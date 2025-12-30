@@ -1,224 +1,93 @@
 # OrderSearchGUI.pyw
-# FileMaker-style Orders search GUI for your FastAPI backend.
-#
-# Current features:
-# - Field-specific search params (AND across fields)
-# - Advanced toggle for client fields
-# - Results columns: Artist, Asset Type, Notes, SP Number, Revision Of (NEW if none), Status
-# - Enter/Return triggers Search
-# - Double-click fetches /orders/{id} fresh from API and shows detail window
-#
-# Detail window workflow:
-# - Draft: editable fields + Save + Finalize (links Trello IDs)
-# - Finalized: read-only + Override Edit… (confirmation) + Save (override=true → rebuild Trello checklist)
+# Orders Search + Details GUI for BYP Ops FastAPI backend
+# - Search orders
+# - Open details
+# - Create Revision / Add'l Version
+# - Finalize / Override Edit / Save
+# - Delete with initials (double speed bump for finalized)
+
+from __future__ import annotations
 
 import json
 import threading
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, simpledialog
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
-from urllib.request import urlopen, Request
-from urllib.error import URLError, HTTPError
+from urllib.request import Request, urlopen
 
 API_BASE = "http://127.0.0.1:8000"
 
 
+# -----------------------------
+# HTTP helpers
+# -----------------------------
 def _read_json_response(resp):
-    data = resp.read().decode("utf-8", errors="replace")
-    return json.loads(data) if data else {}
+    raw = resp.read().decode("utf-8", errors="replace")
+    return json.loads(raw) if raw else {}
 
 
-def http_get_json(url: str, timeout: int = 10):
+def http_get_json(url: str, timeout: int = 10) -> dict:
     req = Request(url, headers={"Accept": "application/json"})
     with urlopen(req, timeout=timeout) as resp:
         return _read_json_response(resp)
 
 
-def http_send_json(method: str, url: str, payload: dict | None, timeout: int = 15):
-    body = None
+def http_send_json(method: str, url: str, payload: dict | None, timeout: int = 15) -> dict:
     headers = {"Accept": "application/json"}
+    data = None
     if payload is not None:
-        body = json.dumps(payload).encode("utf-8")
+        data = json.dumps(payload).encode("utf-8")
         headers["Content-Type"] = "application/json"
-
-    req = Request(url, data=body, headers=headers, method=method)
+    req = Request(url, data=data, headers=headers, method=method)
     with urlopen(req, timeout=timeout) as resp:
         return _read_json_response(resp)
 
 
-def http_post_json(url: str, payload: dict | None = None, timeout: int = 15):
+def http_post_json(url: str, payload: dict | None = None, timeout: int = 15) -> dict:
     return http_send_json("POST", url, payload, timeout=timeout)
 
 
-def http_patch_json(url: str, payload: dict, timeout: int = 15):
+def http_patch_json(url: str, payload: dict, timeout: int = 15) -> dict:
     return http_send_json("PATCH", url, payload, timeout=timeout)
 
 
-class NewOrderDialog(tk.Toplevel):
-    """Brand new order (POST /orders/new)."""
-
-    def __init__(self, parent, prefill_from: dict | None = None):
-        super().__init__(parent)
-        self.parent = parent
-        self.prefill_from = prefill_from or {}
-
-        self.title("Create New Order")
-        self.geometry("780x520")
-        self.resizable(True, True)
-
-        self._build_ui()
-        self._prefill()
-
-    def _build_ui(self):
-        pad = {"padx": 10, "pady": 8}
-
-        top = ttk.Frame(self)
-        top.pack(fill="x", **pad)
-
-        self.status_var = tk.StringVar(value="Ready.")
-        ttk.Label(top, textvariable=self.status_var).pack(side="left")
-
-        form = ttk.Frame(self)
-        form.pack(fill="x", padx=10)
-
-        ttk.Label(form, text="Artist").grid(row=0, column=0, sticky="w")
-        self.artist_var = tk.StringVar()
-        ttk.Entry(form, textvariable=self.artist_var, width=40).grid(row=0, column=1, sticky="w", padx=(0, 18))
-
-        ttk.Label(form, text="Asset Type").grid(row=0, column=2, sticky="w")
-        self.asset_var = tk.StringVar()
-        self.asset_cb = ttk.Combobox(
-            form, textvariable=self.asset_var, values=["radio", "video", "art"], width=12, state="readonly"
-        )
-        self.asset_cb.grid(row=0, column=3, sticky="w")
-
-        ttk.Label(form, text="Client Name").grid(row=1, column=0, sticky="w", pady=(10, 0))
-        self.client_name_var = tk.StringVar()
-        ttk.Entry(form, textvariable=self.client_name_var, width=28).grid(row=1, column=1, sticky="w", padx=(0, 18), pady=(10, 0))
-
-        ttk.Label(form, text="Client Company").grid(row=1, column=2, sticky="w", pady=(10, 0))
-        self.client_company_var = tk.StringVar()
-        ttk.Entry(form, textvariable=self.client_company_var, width=32).grid(row=1, column=3, sticky="w", pady=(10, 0))
-
-        notes_frame = ttk.Frame(self)
-        notes_frame.pack(fill="both", expand=True, padx=10, pady=(10, 10))
-        ttk.Label(notes_frame, text="Notes").pack(anchor="w")
-
-        self.notes_text = tk.Text(notes_frame, height=10, wrap="word")
-        self.notes_text.pack(fill="both", expand=True)
-
-        footer = ttk.Frame(self)
-        footer.pack(fill="x", padx=10, pady=(0, 10))
-
-        self.create_btn = ttk.Button(footer, text="Create", command=self.on_create)
-        self.create_btn.pack(side="left")
-
-        ttk.Button(footer, text="Cancel", command=self.destroy).pack(side="left", padx=(10, 0))
-
-    def _prefill(self):
-        self.artist_var.set((self.prefill_from.get("artist") or "").strip())
-        asset = (self.prefill_from.get("asset_type") or "radio").strip().lower()
-        if asset not in ("radio", "video", "art"):
-            asset = "radio"
-        self.asset_var.set(asset)
-
-        self.client_name_var.set((self.prefill_from.get("client_name") or "").strip())
-        self.client_company_var.set((self.prefill_from.get("client_company_name") or "").strip())
-
-        self.notes_text.delete("1.0", "end")
-        self.notes_text.insert("1.0", "")
-
-    def on_create(self):
-        artist = (self.artist_var.get() or "").strip()
-        asset = (self.asset_var.get() or "").strip().lower()
-        client_name = (self.client_name_var.get() or "").strip()
-        client_company = (self.client_company_var.get() or "").strip()
-        notes = (self.notes_text.get("1.0", "end") or "").strip()
-
-        if not artist:
-            messagebox.showerror("Missing data", "Artist is required.")
-            return
-        if asset not in ("radio", "video", "art"):
-            messagebox.showerror("Missing data", "Asset Type must be radio, video, or art.")
-            return
-
-        payload = {"artist": artist, "asset_type": asset, "notes": notes}
-        if client_name:
-            payload["client_name"] = client_name
-        if client_company:
-            payload["client_company_name"] = client_company
-
-        self.status_var.set("Creating…")
-        self.create_btn.configure(state="disabled")
-
-        def worker():
-            try:
-                created = http_post_json(f"{API_BASE}/orders/new", payload=payload, timeout=20)
-                self.after(0, lambda: self._done_success(created))
-            except HTTPError as e:
-                try:
-                    body = e.read().decode("utf-8", errors="replace")
-                except Exception:
-                    body = str(e)
-                self.after(0, lambda: self._done_fail(f"HTTP {e.code}: {body}"))
-            except URLError as e:
-                self.after(0, lambda: self._done_fail(f"Connection error: {e}"))
-            except Exception as e:
-                self.after(0, lambda: self._done_fail(str(e)))
-
-        threading.Thread(target=worker, daemon=True).start()
-
-    def _done_success(self, created: dict):
-        self.status_var.set("Done.")
-        self.create_btn.configure(state="normal")
-
-        new_id = created.get("id")
-        if not new_id:
-            messagebox.showerror("Created, but…", "Order created, but response did not include an id.")
-            return
-
-        OrderDetailsWindow(self.parent, int(new_id))
-        self.destroy()
-
-    def _done_fail(self, msg: str):
-        self.create_btn.configure(state="normal")
-        self.status_var.set("Failed.")
-        messagebox.showerror("Create failed", msg)
+def http_delete_json(url: str, timeout: int = 15) -> dict:
+    return http_send_json("DELETE", url, payload=None, timeout=timeout)
 
 
+# -----------------------------
+# Dialogs
+# -----------------------------
 class FinalizeDialog(tk.Toplevel):
-    """Finalize a draft order by linking existing Trello card/checklist IDs."""
-
     def __init__(self, parent, order_id: int):
         super().__init__(parent)
         self.parent = parent
         self.order_id = order_id
 
         self.title("Finalize Order (link Trello)")
-        self.geometry("520x200")
+        self.geometry("540x220")
         self.resizable(False, False)
 
         self._build_ui()
 
     def _build_ui(self):
-        pad = {"padx": 10, "pady": 10}
-
         frm = ttk.Frame(self)
-        frm.pack(fill="both", expand=True, **pad)
+        frm.pack(fill="both", expand=True, padx=12, pady=12)
 
         ttk.Label(frm, text="Trello Card ID").grid(row=0, column=0, sticky="w")
         self.card_var = tk.StringVar()
-        ttk.Entry(frm, textvariable=self.card_var, width=45).grid(row=0, column=1, sticky="w")
+        ttk.Entry(frm, textvariable=self.card_var, width=46).grid(row=0, column=1, sticky="w")
 
         ttk.Label(frm, text="Checklist ID").grid(row=1, column=0, sticky="w", pady=(10, 0))
         self.chk_var = tk.StringVar()
-        ttk.Entry(frm, textvariable=self.chk_var, width=45).grid(row=1, column=1, sticky="w", pady=(10, 0))
+        ttk.Entry(frm, textvariable=self.chk_var, width=46).grid(row=1, column=1, sticky="w", pady=(10, 0))
 
-        self.status_var = tk.StringVar(value="Provide the IDs from the Trello card that was created for this order.")
-        ttk.Label(frm, textvariable=self.status_var, wraplength=480).grid(row=2, column=0, columnspan=2, sticky="w", pady=(10, 0))
+        self.status_var = tk.StringVar(value="Paste the IDs from the Trello card/checklist for this order.")
+        ttk.Label(frm, textvariable=self.status_var, wraplength=500).grid(row=2, column=0, columnspan=2, sticky="w", pady=(10, 0))
 
         btns = ttk.Frame(self)
-        btns.pack(fill="x", padx=10, pady=(0, 10))
+        btns.pack(fill="x", padx=12, pady=(0, 12))
 
         self.ok_btn = ttk.Button(btns, text="Finalize", command=self.on_finalize)
         self.ok_btn.pack(side="left")
@@ -237,15 +106,11 @@ class FinalizeDialog(tk.Toplevel):
 
         def worker():
             try:
-                url = f"{API_BASE}/orders/{self.order_id}/finalize?{urlencode({'trello_card_id': card, 'trello_checklist_id': chk})}"
-                http_post_json(url, payload=None, timeout=25)
+                qs = urlencode({"trello_card_id": card, "trello_checklist_id": chk})
+                http_post_json(f"{API_BASE}/orders/{self.order_id}/finalize?{qs}", payload=None, timeout=25)
                 self.after(0, self._done)
             except HTTPError as e:
-                try:
-                    body = e.read().decode("utf-8", errors="replace")
-                except Exception:
-                    body = str(e)
-                self.after(0, lambda: self._fail(f"HTTP {e.code}: {body}"))
+                self.after(0, lambda: self._fail(_http_error_to_message(e)))
             except Exception as e:
                 self.after(0, lambda: self._fail(str(e)))
 
@@ -262,29 +127,166 @@ class FinalizeDialog(tk.Toplevel):
         messagebox.showerror("Finalize failed", msg)
 
 
+class NewOrderDialog(tk.Toplevel):
+    def __init__(self, parent, prefill: dict | None = None):
+        super().__init__(parent)
+        self.parent = parent
+        self.prefill = prefill or {}
+
+        self.title("Create New Order")
+        self.geometry("780x520")
+        self.resizable(True, True)
+
+        self._build_ui()
+        self._apply_prefill()
+
+    def _build_ui(self):
+        top = ttk.Frame(self)
+        top.pack(fill="x", padx=10, pady=8)
+
+        self.status_var = tk.StringVar(value="Ready.")
+        ttk.Label(top, textvariable=self.status_var).pack(side="left")
+
+        form = ttk.Frame(self)
+        form.pack(fill="x", padx=10)
+
+        ttk.Label(form, text="Artist").grid(row=0, column=0, sticky="w")
+        self.artist_var = tk.StringVar()
+        ttk.Entry(form, textvariable=self.artist_var, width=44).grid(row=0, column=1, sticky="w", padx=(0, 18))
+
+        ttk.Label(form, text="Asset Type").grid(row=0, column=2, sticky="w")
+        self.asset_var = tk.StringVar()
+        ttk.Combobox(form, textvariable=self.asset_var, values=["radio", "video", "art"], width=12, state="readonly").grid(row=0, column=3, sticky="w")
+
+        ttk.Label(form, text="Client Name").grid(row=1, column=0, sticky="w", pady=(10, 0))
+        self.client_name_var = tk.StringVar()
+        ttk.Entry(form, textvariable=self.client_name_var, width=28).grid(row=1, column=1, sticky="w", padx=(0, 18), pady=(10, 0))
+
+        ttk.Label(form, text="Client Company").grid(row=1, column=2, sticky="w", pady=(10, 0))
+        self.client_company_var = tk.StringVar()
+        ttk.Entry(form, textvariable=self.client_company_var, width=34).grid(row=1, column=3, sticky="w", pady=(10, 0))
+
+        notes_frame = ttk.Frame(self)
+        notes_frame.pack(fill="both", expand=True, padx=10, pady=(10, 10))
+        ttk.Label(notes_frame, text="Notes").pack(anchor="w")
+        self.notes_text = tk.Text(notes_frame, height=12, wrap="word")
+        self.notes_text.pack(fill="both", expand=True)
+
+        btns = ttk.Frame(self)
+        btns.pack(fill="x", padx=10, pady=(0, 10))
+        self.create_btn = ttk.Button(btns, text="Create", command=self.on_create)
+        self.create_btn.pack(side="left")
+        ttk.Button(btns, text="Cancel", command=self.destroy).pack(side="left", padx=(10, 0))
+
+    def _apply_prefill(self):
+        self.artist_var.set((self.prefill.get("artist") or "").strip())
+        asset = (self.prefill.get("asset_type") or "radio").strip().lower()
+        if asset not in ("radio", "video", "art"):
+            asset = "radio"
+        self.asset_var.set(asset)
+        self.client_name_var.set((self.prefill.get("client_name") or "").strip())
+        self.client_company_var.set((self.prefill.get("client_company_name") or "").strip())
+        self.notes_text.delete("1.0", "end")
+        self.notes_text.insert("1.0", "")
+
+    def on_create(self):
+        artist = (self.artist_var.get() or "").strip()
+        asset = (self.asset_var.get() or "").strip().lower()
+        if not artist:
+            messagebox.showerror("Missing data", "Artist is required.")
+            return
+        if asset not in ("radio", "video", "art"):
+            messagebox.showerror("Missing data", "Asset Type must be radio, video, or art.")
+            return
+
+        payload = {
+            "artist": artist,
+            "asset_type": asset,
+            "notes": (self.notes_text.get("1.0", "end") or "").strip(),
+        }
+        cn = (self.client_name_var.get() or "").strip()
+        cco = (self.client_company_var.get() or "").strip()
+        if cn:
+            payload["client_name"] = cn
+        if cco:
+            payload["client_company_name"] = cco
+
+        self.create_btn.configure(state="disabled")
+        self.status_var.set("Creating…")
+
+        def worker():
+            try:
+                created = http_post_json(f"{API_BASE}/orders/new", payload=payload, timeout=20)
+                self.after(0, lambda: self._done(created))
+            except HTTPError as e:
+                self.after(0, lambda: self._fail(_http_error_to_message(e)))
+            except URLError as e:
+                self.after(0, lambda: self._fail(f"Connection error: {e}"))
+            except Exception as e:
+                self.after(0, lambda: self._fail(str(e)))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _done(self, created: dict):
+        self.create_btn.configure(state="normal")
+        oid = created.get("id")
+        if not oid:
+            messagebox.showerror("Created, but…", "Order created but no id returned.")
+            return
+        OrderDetailsWindow(self.parent, int(oid))
+        self.destroy()
+
+    def _fail(self, msg: str):
+        self.create_btn.configure(state="normal")
+        self.status_var.set("Failed.")
+        messagebox.showerror("Create failed", msg)
+
+
+# -----------------------------
+# Helpers
+# -----------------------------
+def _http_error_to_message(e: HTTPError) -> str:
+    try:
+        body = e.read().decode("utf-8", errors="replace")
+    except Exception:
+        body = str(e)
+    return f"HTTP {e.code}: {body}"
+
+
+def _safe_get(d: dict, *keys, default=None):
+    cur = d
+    for k in keys:
+        if not isinstance(cur, dict) or k not in cur:
+            return default
+        cur = cur[k]
+    return cur
+
+
+# -----------------------------
+# Details window
+# -----------------------------
 class OrderDetailsWindow(tk.Toplevel):
     def __init__(self, parent, order_id: int):
         super().__init__(parent)
         self.parent = parent
         self.order_id = order_id
-        self.order_data = None
-
+        self.order_data: dict | None = None
         self._override_mode = False
 
-        self.geometry("980x740")
+        self.title(f"Order {order_id}")
+        self.geometry("980x760")
+
         self._build_ui()
         self.refresh()
 
     def _build_ui(self):
-        pad = {"padx": 10, "pady": 8}
-
         header = ttk.Frame(self)
-        header.pack(fill="x", **pad)
+        header.pack(fill="x", padx=10, pady=8)
 
         self.title_var = tk.StringVar(value="(loading…)")
         ttk.Label(header, textvariable=self.title_var, font=("Segoe UI", 12, "bold")).pack(side="left")
 
-        self.status_var = tk.StringVar(value="Loading…")
+        self.status_var = tk.StringVar(value="")
         ttk.Label(header, textvariable=self.status_var).pack(side="right")
 
         actions = ttk.Frame(self)
@@ -297,6 +299,11 @@ class OrderDetailsWindow(tk.Toplevel):
         ttk.Button(actions, text="New", command=self.on_new).pack(side="left")
         ttk.Button(actions, text="Add'l Vers Of", command=self.on_addl_vers).pack(side="left", padx=(8, 0))
         ttk.Button(actions, text="Revision Of", command=self.on_revision_of).pack(side="left", padx=(8, 0))
+
+        ttk.Separator(actions, orient="vertical").pack(side="left", fill="y", padx=10)
+
+        self.delete_btn = ttk.Button(actions, text="Delete…", command=self.on_delete)
+        self.delete_btn.pack(side="left")
 
         ttk.Separator(actions, orient="vertical").pack(side="left", fill="y", padx=10)
 
@@ -314,14 +321,14 @@ class OrderDetailsWindow(tk.Toplevel):
         body = ttk.Frame(self)
         body.pack(fill="x", padx=10)
 
-        self.vars = {}
+        self.vars: dict[str, tuple[tk.StringVar, ttk.Entry]] = {}
 
-        def add_row(r, c, label, width=38):
-            ttk.Label(body, text=label).grid(row=r, column=c, sticky="w", pady=(0, 4))
-            var = tk.StringVar(value="")
-            ent = ttk.Entry(body, textvariable=var, width=width)
-            ent.grid(row=r + 1, column=c, sticky="w", padx=(0, 16), pady=(0, 10))
-            self.vars[label] = (var, ent)
+        def add_row(row, col, label, width=38):
+            ttk.Label(body, text=label).grid(row=row, column=col, sticky="w", pady=(0, 4))
+            v = tk.StringVar(value="")
+            e = ttk.Entry(body, textvariable=v, width=width)
+            e.grid(row=row + 1, column=col, sticky="w", padx=(0, 16), pady=(0, 10))
+            self.vars[label] = (v, e)
 
         add_row(0, 0, "Artist", 46)
         add_row(0, 1, "Asset Type", 18)
@@ -334,6 +341,7 @@ class OrderDetailsWindow(tk.Toplevel):
         add_row(4, 0, "Add'l Vers Of", 22)
         add_row(4, 1, "Status", 18)
         add_row(4, 2, "Trello Card ID", 34)
+
         add_row(6, 2, "Checklist ID", 34)
 
         notes_frame = ttk.Frame(self)
@@ -344,11 +352,13 @@ class OrderDetailsWindow(tk.Toplevel):
         self.notes_text.pack(fill="both", expand=True)
 
     def _set_entry_state(self, editable: bool):
-        for label, (_var, ent) in self.vars.items():
-            if label in ("Asset Type", "SP Number", "Revision Of", "Add'l Vers Of", "Trello Card ID", "Checklist ID", "Status"):
+        for label, (_v, ent) in self.vars.items():
+            # Asset Type + SP fields are always read-only
+            if label in ("Asset Type", "SP Number", "Revision Of", "Add'l Vers Of", "Status", "Trello Card ID", "Checklist ID"):
                 ent.configure(state="readonly")
             else:
                 ent.configure(state="normal" if editable else "readonly")
+
         self.notes_text.configure(state="normal" if editable else "disabled")
 
     def refresh(self):
@@ -356,14 +366,10 @@ class OrderDetailsWindow(tk.Toplevel):
 
         def worker():
             try:
-                data = http_get_json(f"{API_BASE}/orders/{self.order_id}", timeout=15)
+                data = http_get_json(f"{API_BASE}/orders/{self.order_id}", timeout=20)
                 self.after(0, lambda: self._apply_order(data))
             except HTTPError as e:
-                try:
-                    body = e.read().decode("utf-8", errors="replace")
-                except Exception:
-                    body = str(e)
-                self.after(0, lambda: self._fail(f"HTTP {e.code}: {body}"))
+                self.after(0, lambda: self._fail(_http_error_to_message(e)))
             except URLError as e:
                 self.after(0, lambda: self._fail(f"Connection error: {e}"))
             except Exception as e:
@@ -372,105 +378,61 @@ class OrderDetailsWindow(tk.Toplevel):
         threading.Thread(target=worker, daemon=True).start()
 
     def _fail(self, msg: str):
-        self.status_var.set("Load failed.")
-        messagebox.showerror("Order load failed", msg)
+        self.status_var.set("Failed.")
+        messagebox.showerror("Load failed", msg)
 
     def _apply_order(self, data: dict):
         self.order_data = data
-        self.status_var.set("Loaded.")
+        status = (data.get("status") or "").strip().lower()
+        sp = data.get("sp") or {}
 
-        artist = (data.get("artist") or "").strip() or "(no artist)"
-        self.title_var.set(artist)
-        self.title(f"Order Details — {artist} — #{data.get('id', self.order_id)}")
+        self.title_var.set(f"Order {data.get('id')} — {data.get('artist') or ''}")
+        self.status_var.set(status or "draft")
 
-        sp = data.get("sp") if isinstance(data, dict) else None
-        sp_number = ""
-        sp_revision_of = ""
-        sp_addl_of = ""
-        if isinstance(sp, dict):
-            sp_number = sp.get("sp_number", "") or ""
-            sp_revision_of = sp.get("revision_of", "") or ""
-            sp_addl_of = sp.get("additional_version_of", "") or ""
+        def set_field(label, value):
+            v, _e = self.vars[label]
+            v.set("" if value is None else str(value))
 
-        revision_of = data.get("revision_of") or sp_revision_of or "NEW"
-        addl_of = data.get("additional_version_of") or sp_addl_of or "NEW"
-        status = (data.get("status") or "draft").strip().lower()
-
-        self.vars["Artist"][0].set(artist)
-        self.vars["Asset Type"][0].set(data.get("asset_type", "") or "")
-        self.vars["SP Number"][0].set(sp_number)
-        self.vars["Client Name"][0].set(data.get("client_name", "") or "")
-        self.vars["Client Company"][0].set(data.get("client_company_name", "") or "")
-        self.vars["Revision Of"][0].set(revision_of)
-        self.vars["Add'l Vers Of"][0].set(addl_of)
-
-        self.vars["Status"][0].set(status.upper())
-        self.vars["Trello Card ID"][0].set(data.get("trello_card_id", "") or "")
-        self.vars["Checklist ID"][0].set(data.get("trello_checklist_id", "") or "")
+        set_field("Artist", data.get("artist", ""))
+        set_field("Asset Type", data.get("asset_type", ""))
+        set_field("SP Number", sp.get("sp_number", "") if isinstance(sp, dict) else "")
+        set_field("Client Name", data.get("client_name", ""))
+        set_field("Client Company", data.get("client_company_name", ""))
+        set_field("Revision Of", sp.get("revision_of", "") if isinstance(sp, dict) else "")
+        set_field("Add'l Vers Of", sp.get("additional_version_of", "") if isinstance(sp, dict) else "")
+        set_field("Status", status)
+        set_field("Trello Card ID", data.get("trello_card_id", ""))
+        set_field("Checklist ID", data.get("trello_checklist_id", ""))
 
         self.notes_text.configure(state="normal")
         self.notes_text.delete("1.0", "end")
-        self.notes_text.insert("1.0", (data.get("notes") or "").strip())
+        self.notes_text.insert("1.0", data.get("notes") or "")
         self.notes_text.configure(state="disabled")
 
-        self._override_mode = False
-        if status == "draft":
-            self._set_entry_state(True)
-            self.edit_btn.configure(state="disabled")
-            self.save_btn.configure(state="normal")
-            self.finalize_btn.configure(state="normal")
-        else:
-            self._set_entry_state(False)
-            self.edit_btn.configure(state="normal")
-            self.save_btn.configure(state="disabled")
-            self.finalize_btn.configure(state="disabled")
+        editable = (status != "finalized") or self._override_mode
+        self._set_entry_state(editable)
+
+        # Buttons states
+        self.finalize_btn.configure(state=("normal" if status != "finalized" else "disabled"))
+        self.edit_btn.configure(state=("normal" if status == "finalized" else "disabled"))
+        self.save_btn.configure(state=("normal" if editable else "disabled"))
+        self.delete_btn.configure(state="normal")  # delete allowed for both (with double bump for finalized)
 
     def on_new(self):
-        if not self.order_data:
-            messagebox.showinfo("Hold up", "This order hasn't finished loading yet.")
-            return
-        NewOrderDialog(self, prefill_from=self.order_data)
+        NewOrderDialog(self.parent, prefill={"artist": self.vars["Artist"][0].get(), "asset_type": self.vars["Asset Type"][0].get()})
 
     def on_addl_vers(self):
         if not self.order_data:
             return
 
-        ok = messagebox.askyesno(
-            "Add'l Vers Of",
-            "Create a new ADD'L VERSION order from this one?\n\n"            "This will create a new DRAFT order (same asset_type) with a NEW SP, "
-            "set Add'l Vers Of to this SP, and open it.",
-        )
-        if not ok:
-            return
-
-        self.status_var.set("Creating add’l version…")
-
-        def fail(msg: str):
-            self.status_var.set("Add’l version failed.")
-            messagebox.showerror("Add'l Vers Of failed", msg)
-
         def worker():
             try:
-                data = http_post_json(f"{API_BASE}/orders/{self.order_id}/addl_vers", payload=None, timeout=25)
-                new_id = data.get("id") if isinstance(data, dict) else None
-                if not new_id:
-                    raise Exception(f"Unexpected response: {data!r}")
-
-                def open_new():
-                    self.status_var.set("Add’l version created.")
-                    OrderDetailsWindow(self.parent, int(new_id))
-
-                self.after(0, open_new)
+                created = http_post_json(f"{API_BASE}/orders/{self.order_id}/addl_vers", payload=None, timeout=25)
+                self.after(0, lambda: self._open_new(created))
             except HTTPError as e:
-                try:
-                    body = e.read().decode("utf-8", errors="replace")
-                except Exception:
-                    body = str(e)
-                self.after(0, lambda: fail(f"HTTP {e.code}: {body}"))
-            except URLError as e:
-                self.after(0, lambda: fail(f"Connection error: {e}"))
+                self.after(0, lambda: messagebox.showerror("Add'l version failed", _http_error_to_message(e)))
             except Exception as e:
-                self.after(0, lambda: fail(str(e)))
+                self.after(0, lambda: messagebox.showerror("Add'l version failed", str(e)))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -478,425 +440,368 @@ class OrderDetailsWindow(tk.Toplevel):
         if not self.order_data:
             return
 
-        ok = messagebox.askyesno(
-            "Revision Of",
-            "Create a new revision order from this one?\n\nThis will create a new DRAFT revision and open it.",
-        )
-        if not ok:
-            return
-
-        self.status_var.set("Creating revision…")
-
-        def fail(msg: str):
-            self.status_var.set("Revision failed.")
-            messagebox.showerror("Revision Of failed", msg)
-
         def worker():
             try:
-                data = http_post_json(f"{API_BASE}/orders/{self.order_id}/revise", payload=None, timeout=25)
-                new_id = data.get("id") if isinstance(data, dict) else None
-                if not new_id:
-                    raise Exception(f"Unexpected response: {data!r}")
-
-                def open_new():
-                    self.status_var.set("Revision created.")
-                    OrderDetailsWindow(self.parent, int(new_id))
-
-                self.after(0, open_new)
+                created = http_post_json(f"{API_BASE}/orders/{self.order_id}/revise", payload=None, timeout=25)
+                self.after(0, lambda: self._open_new(created))
             except HTTPError as e:
-                try:
-                    body = e.read().decode("utf-8", errors="replace")
-                except Exception:
-                    body = str(e)
-                self.after(0, lambda: fail(f"HTTP {e.code}: {body}"))
-            except URLError as e:
-                self.after(0, lambda: fail(f"Connection error: {e}"))
+                self.after(0, lambda: messagebox.showerror("Revision failed", _http_error_to_message(e)))
             except Exception as e:
-                self.after(0, lambda: fail(str(e)))
+                self.after(0, lambda: messagebox.showerror("Revision failed", str(e)))
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def _open_new(self, created: dict):
+        new_id = created.get("id")
+        if not new_id:
+            messagebox.showerror("Created, but…", "No new order id returned.")
+            return
+        OrderDetailsWindow(self.parent, int(new_id))
+
     def on_finalize(self):
         if not self.order_data:
+            return
+        status = (self.order_data.get("status") or "").strip().lower()
+        if status == "finalized":
             return
         FinalizeDialog(self, self.order_id)
 
     def on_override_edit(self):
         if not self.order_data:
             return
+        status = (self.order_data.get("status") or "").strip().lower()
+        if status != "finalized":
+            return
 
         ok = messagebox.askyesno(
             "Override edit",
-            "This order is FINALIZED (Trello already exists).\n\nEdit anyway?\n\nSaving will rebuild the Trello checklist.",
+            "This order is FINALIZED (already processed).\n\nEdit anyway?\n\nSaving will rebuild the Trello checklist.",
         )
         if not ok:
             return
 
         self._override_mode = True
         self._set_entry_state(True)
-        self.edit_btn.configure(state="disabled")
         self.save_btn.configure(state="normal")
+        self.status_var.set("override")
 
     def on_save(self):
         if not self.order_data:
             return
 
-        artist = (self.vars["Artist"][0].get() or "").strip()
-        client_name = (self.vars["Client Name"][0].get() or "").strip()
-        client_company = (self.vars["Client Company"][0].get() or "").strip()
-        notes = (self.notes_text.get("1.0", "end") or "").strip()
-
-        if not artist:
-            messagebox.showerror("Missing data", "Artist is required.")
+        status = (self.order_data.get("status") or "").strip().lower()
+        if status == "finalized" and not self._override_mode:
+            messagebox.showerror("Read-only", "This order is finalized. Use Override Edit… first.")
             return
 
         payload = {
-            "artist": artist,
-            "notes": notes,
-            "client_name": client_name,
-            "client_company_name": client_company,
+            "artist": self.vars["Artist"][0].get().strip(),
+            "notes": (self.notes_text.get("1.0", "end") or "").strip(),
+            "client_name": self.vars["Client Name"][0].get().strip() or None,
+            "client_company_name": self.vars["Client Company"][0].get().strip() or None,
         }
 
-        qs = "?override=true" if self._override_mode else ""
+        qs = ""
+        if status == "finalized" and self._override_mode:
+            qs = "?override=true"
 
-        self.status_var.set("Saving…")
         self.save_btn.configure(state="disabled")
+        self.status_var.set("Saving…")
 
         def worker():
             try:
-                http_patch_json(f"{API_BASE}/orders/{self.order_id}{qs}", payload, timeout=30)
-                self.after(0, self._after_save)
+                updated = http_patch_json(f"{API_BASE}/orders/{self.order_id}{qs}", payload=payload, timeout=30)
+                self.after(0, lambda: self._after_save(updated))
             except HTTPError as e:
-                try:
-                    body = e.read().decode("utf-8", errors="replace")
-                except Exception:
-                    body = str(e)
-                self.after(0, lambda: self._after_save_fail(f"HTTP {e.code}: {body}"))
+                self.after(0, lambda: self._after_save_fail(_http_error_to_message(e)))
             except Exception as e:
                 self.after(0, lambda: self._after_save_fail(str(e)))
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _after_save(self):
-        self.status_var.set("Saved.")
-        self.refresh()
+    def _after_save(self, updated: dict):
+        self.save_btn.configure(state="normal")
+        # override mode should drop back off after save
+        self._override_mode = False
+        self._apply_order(updated)
+        if hasattr(self.parent, "run_search"):
+            self.parent.run_search(silent=True)
 
     def _after_save_fail(self, msg: str):
         self.save_btn.configure(state="normal")
-        self.status_var.set("Save failed.")
+        self.status_var.set("Failed.")
         messagebox.showerror("Save failed", msg)
 
-
-class OrderSearchGUI(tk.Tk):
-    def __init__(self):
-        super().__init__()
-        self.title("Orders Search")
-        self.geometry("1200x640")
-
-        self.advanced_visible = tk.BooleanVar(value=False)
-        self.show_order_id = False
-        self._build_ui()
-
-        self.bind_all("<Return>", self._on_enter_key)
-
-    def _on_enter_key(self, _event=None):
-        if str(self.search_btn["state"]) != "disabled":
-            self.on_search()
-
-    def _build_ui(self):
-        pad = {"padx": 8, "pady": 6}
-
-        top = ttk.Frame(self)
-        top.pack(fill="x", **pad)
-
-        ttk.Label(top, text="Artist").grid(row=0, column=0, sticky="w")
-        self.artist_var = tk.StringVar()
-        ttk.Entry(top, textvariable=self.artist_var, width=35).grid(row=0, column=1, sticky="we", padx=(0, 12))
-
-        ttk.Label(top, text="Asset Type").grid(row=0, column=2, sticky="w")
-        self.asset_var = tk.StringVar()
-        self.asset_cb = ttk.Combobox(
-            top, textvariable=self.asset_var, values=["", "radio", "video", "art"], width=12, state="readonly"
-        )
-        self.asset_cb.grid(row=0, column=3, sticky="w", padx=(0, 12))
-        self.asset_cb.current(0)
-
-        ttk.Label(top, text="SP Number").grid(row=0, column=4, sticky="w")
-        self.spnum_var = tk.StringVar()
-        ttk.Entry(top, textvariable=self.spnum_var, width=18).grid(row=0, column=5, sticky="w")
-
-        ttk.Label(top, text="Notes").grid(row=1, column=0, sticky="w")
-        self.notes_var = tk.StringVar()
-        ttk.Entry(top, textvariable=self.notes_var, width=35).grid(row=1, column=1, sticky="we", padx=(0, 12))
-
-        self.adv_btn = ttk.Button(top, text="Show Advanced ▾", command=self.toggle_advanced)
-        self.adv_btn.grid(row=1, column=2, sticky="w", padx=(0, 12))
-
-        self.adv_frame = ttk.Frame(top)
-
-        ttk.Label(self.adv_frame, text="Client Name").grid(row=0, column=0, sticky="w")
-        self.client_name_var = tk.StringVar()
-        ttk.Entry(self.adv_frame, textvariable=self.client_name_var, width=25).grid(row=0, column=1, sticky="w", padx=(0, 12))
-
-        ttk.Label(self.adv_frame, text="Client Company").grid(row=0, column=2, sticky="w")
-        self.client_company_var = tk.StringVar()
-        ttk.Entry(self.adv_frame, textvariable=self.client_company_var, width=30).grid(row=0, column=3, sticky="w")
-
-        btns = ttk.Frame(self)
-        btns.pack(fill="x", **pad)
-
-        self.search_btn = ttk.Button(btns, text="Search", command=self.on_search)
-        self.search_btn.pack(side="left")
-
-        ttk.Button(btns, text="Open Selected", command=self.open_selected_from_api).pack(side="left", padx=(8, 0))
-        ttk.Button(btns, text="Clear", command=self.on_clear).pack(side="left", padx=(8, 0))
-        ttk.Button(btns, text="Ping API", command=self.on_ping).pack(side="left", padx=(8, 0))
-
-        self.show_id_btn = ttk.Button(btns, text="Show Order ID", command=self.on_show_order_id)
-        self.show_id_btn.pack(side="left", padx=(8, 0))
-
-        self.status_var = tk.StringVar(value="Ready.")
-        ttk.Label(btns, textvariable=self.status_var).pack(side="right")
-
-        table_frame = ttk.Frame(self)
-        table_frame.pack(fill="both", expand=True, **pad)
-
-        cols = self._current_tree_columns()
-        self.tree = ttk.Treeview(table_frame, columns=cols, show="headings", height=18)
-        self.tree.pack(side="left", fill="both", expand=True)
-
-        yscroll = ttk.Scrollbar(table_frame, orient="vertical", command=self.tree.yview)
-        yscroll.pack(side="right", fill="y")
-        self.tree.configure(yscrollcommand=yscroll.set)
-
-        self._tree_headings = {
-            "status": "Status",
-            "artist": "Artist",
-            "asset_type": "Asset Type",
-            "notes": "Notes",
-            "sp_number": "SP Number",
-            "revision_of": "Revision Of",
-            "additional_version_of": "Add'l Vers Of",
-            "order_id": "Order ID",
-        }
-        self._tree_widths = {
-            "status": 90,
-            "artist": 240,
-            "asset_type": 110,
-            "notes": 520,
-            "sp_number": 120,
-            "revision_of": 140,
-            "additional_version_of": 140,
-            "order_id": 90,
-        }
-
-        self._apply_tree_columns()
-
-        self.tree.bind("<Double-1>", lambda _e: self.open_selected_from_api())
-
-        self._last_rows = []
-        top.columnconfigure(1, weight=1)
-
-    
-    def _current_tree_columns(self):
-        base = ("status", "artist", "asset_type", "notes", "sp_number", "revision_of", "additional_version_of")
-        if getattr(self, "show_order_id", False):
-            return base + ("order_id",)
-        return base
-
-    def _apply_tree_columns(self):
-        cols = self._current_tree_columns()
-        self.tree.configure(columns=cols)
-        self.tree["displaycolumns"] = cols
-
-        for c in cols:
-            self.tree.heading(c, text=self._tree_headings.get(c, c))
-            self.tree.column(c, width=self._tree_widths.get(c, 100), anchor="w")
-
-    def on_show_order_id(self):
-        # One-way: add the column, then disable the button (no toggling needed).
-        if getattr(self, "show_order_id", False):
+    def on_delete(self):
+        if not self.order_data:
             return
-        self.show_order_id = True
 
-        if hasattr(self, "show_id_btn") and self.show_id_btn:
-            self.show_id_btn.configure(state="disabled", text="Order ID Shown")
+        status = (self.order_data.get("status") or "").strip().lower()
+        is_finalized = status == "finalized"
 
-        self._apply_tree_columns()
-        # Re-render current rows so the new column is populated.
-        self._set_rows(self._last_rows)
+        if is_finalized:
+            ok = messagebox.askokcancel(
+                "Delete FINALIZED order",
+                "You are about to delete an order that has ALREADY BEEN PROCESSED.\n\nThis is dangerous.\n\nContinue?",
+                icon="warning",
+            )
+            if not ok:
+                return
 
-    def toggle_advanced(self):
-        if self.advanced_visible.get():
-            self.adv_frame.grid_forget()
-            self.advanced_visible.set(False)
-            self.adv_btn.configure(text="Show Advanced ▾")
-        else:
-            self.adv_frame.grid(row=2, column=0, columnspan=6, sticky="w", pady=(6, 0))
-            self.advanced_visible.set(True)
-            self.adv_btn.configure(text="Hide Advanced ▴")
+        initials = simpledialog.askstring("Confirm delete", "Type your initials to confirm deletion:", parent=self)
+        initials = (initials or "").strip()
+        if not initials:
+            messagebox.showerror("Cancelled", "Initials are required to delete.")
+            return
 
-    def on_ping(self):
-        try:
-            data = http_get_json(f"{API_BASE}/")
-            self.status_var.set(data.get("status", "OK"))
-        except Exception as e:
-            messagebox.showerror("Ping failed", str(e))
+        if is_finalized:
+            ok2 = messagebox.askokcancel(
+                "Are you sure?",
+                f"FINAL check.\n\nDelete order {self.order_id}?\n\nInitials: {initials}",
+                icon="warning",
+            )
+            if not ok2:
+                return
 
-    def on_clear(self):
-        self.artist_var.set("")
-        self.asset_var.set("")
-        self.spnum_var.set("")
-        self.notes_var.set("")
-        self.client_name_var.set("")
-        self.client_company_var.set("")
-        self.status_var.set("Cleared.")
-        self._set_rows([])
+        qs = {"initials": initials}
+        if is_finalized:
+            qs["force"] = "true"
 
-    def _build_params(self):
-        params = {}
-        if self.artist_var.get().strip():
-            params["artist"] = self.artist_var.get().strip()
-        if self.asset_var.get().strip():
-            params["asset_type"] = self.asset_var.get().strip()
-        if self.notes_var.get().strip():
-            params["notes"] = self.notes_var.get().strip()
-        if self.spnum_var.get().strip():
-            params["sp_number"] = self.spnum_var.get().strip()
-
-        if self.advanced_visible.get():
-            if self.client_name_var.get().strip():
-                params["client_name"] = self.client_name_var.get().strip()
-            if self.client_company_var.get().strip():
-                params["client_company_name"] = self.client_company_var.get().strip()
-
-        return params
-
-    def on_search(self):
-        params = self._build_params()
-        qs = urlencode(params, doseq=False)
-        url = f"{API_BASE}/orders/search"
-        if qs:
-            url += "?" + qs
-
-        self.status_var.set("Searching…")
-        self.search_btn.configure(state="disabled")
+        self.delete_btn.configure(state="disabled")
+        self.status_var.set("Deleting…")
 
         def worker():
             try:
-                rows = http_get_json(url, timeout=15)
-                if not isinstance(rows, list):
-                    raise ValueError("Unexpected response; expected list.")
-                self.after(0, lambda: self._finish_search(rows))
+                http_delete_json(f"{API_BASE}/orders/{self.order_id}?{urlencode(qs)}", timeout=25)
+                self.after(0, self._after_delete_ok)
             except HTTPError as e:
-                try:
-                    body = e.read().decode("utf-8", errors="replace")
-                except Exception:
-                    body = str(e)
-                self.after(0, lambda: self._fail_search(f"HTTP {e.code}: {body}"))
+                self.after(0, lambda: self._after_delete_fail(_http_error_to_message(e)))
             except Exception as e:
-                self.after(0, lambda: self._fail_search(str(e)))
+                self.after(0, lambda: self._after_delete_fail(str(e)))
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _finish_search(self, rows):
-        self._set_rows(rows)
-        self.status_var.set(f"Found {len(rows)} result(s).")
-        self.search_btn.configure(state="normal")
+    def _after_delete_ok(self):
+        if hasattr(self.parent, "run_search"):
+            self.parent.run_search(silent=True)
+        self.destroy()
 
-    def _fail_search(self, msg):
-        self.search_btn.configure(state="normal")
-        self.status_var.set("Search failed.")
-        messagebox.showerror("Search failed", msg)
-
-    def _extract_sp_fields(self, r: dict):
-        sp_number = ""
-        sp_revision_of = ""
-        sp = r.get("sp") if isinstance(r, dict) else None
-        if isinstance(sp, dict):
-            sp_number = sp.get("sp_number", "") or ""
-            sp_revision_of = sp.get("revision_of", "") or ""
-        return sp_number, sp_revision_of
-
-    def _extract_revision_of(self, r: dict):
-        order_rev = r.get("revision_of") if isinstance(r, dict) else None
-        if order_rev:
-            return order_rev
-
-        _, sp_rev = self._extract_sp_fields(r)
-        if sp_rev:
-            return sp_rev
-
-        return "NEW"
+    def _after_delete_fail(self, msg: str):
+        self.delete_btn.configure(state="normal")
+        self.status_var.set("Failed.")
+        messagebox.showerror("Delete failed", msg)
 
 
-    def _extract_addl_version_of(self, r: dict):
-        # Prefer order-level field if it ever exists, otherwise use nested sp.additional_version_of
-        order_addl = r.get("additional_version_of") if isinstance(r, dict) else None
-        if order_addl:
-            return order_addl
+# -----------------------------
+# Search GUI
+# -----------------------------
+class OrderSearchGUI(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title("BYP Ops — Orders")
+        self.geometry("1080x720")
 
-        sp = r.get("sp") if isinstance(r, dict) else None
-        if isinstance(sp, dict):
-            sp_addl = sp.get("additional_version_of") or ""
-            if sp_addl:
-                return sp_addl
+        self.show_order_id = False
 
-        return "NEW"
+        self._build_ui()
 
-    def _set_rows(self, rows):
-        self._last_rows = rows or []
-        for item in self.tree.get_children():
-            self.tree.delete(item)
+    def _build_ui(self):
+        top = ttk.Frame(self)
+        top.pack(fill="x", padx=10, pady=10)
 
-        for idx, r in enumerate(self._last_rows):
-            sp_number, _ = self._extract_sp_fields(r)
-            revision_of = self._extract_revision_of(r)
-            addl_of = self._extract_addl_version_of(r)
-            status = (r.get("status") or "draft").strip().upper()
-            cols = self.tree["columns"]
-            row_values = {
-                "status": status,
-                "artist": r.get("artist", "") or "",
-                "asset_type": r.get("asset_type", "") or "",
-                "notes": (r.get("notes", "") or "").replace("\n", " "),
-                "sp_number": sp_number,
-                "revision_of": revision_of,
-                "additional_version_of": addl_of,
-                "order_id": str(r.get("id", "") or ""),
-            }
-            values = tuple(row_values.get(c, "") for c in cols)
+        ttk.Label(top, text="Artist").grid(row=0, column=0, sticky="w")
+        self.artist_var = tk.StringVar()
+        ent_artist = ttk.Entry(top, textvariable=self.artist_var, width=28)
+        ent_artist.grid(row=0, column=1, sticky="w", padx=(0, 12))
 
-            self.tree.insert(
-                "",
-                "end",
-                iid=str(idx),
-                values=values,
-            )
-    def _get_selected_row(self):
-        sel = self.tree.selection()
-        if not sel:
-            return None
-        try:
-            idx = int(sel[0])
-            return self._last_rows[idx]
-        except Exception:
-            return None
+        ttk.Label(top, text="Asset").grid(row=0, column=2, sticky="w")
+        self.asset_var = tk.StringVar()
+        ttk.Combobox(top, textvariable=self.asset_var, values=["", "radio", "video", "art"], width=10, state="readonly").grid(row=0, column=3, sticky="w", padx=(0, 12))
+
+        ttk.Label(top, text="Notes").grid(row=0, column=4, sticky="w")
+        self.notes_var = tk.StringVar()
+        ttk.Entry(top, textvariable=self.notes_var, width=28).grid(row=0, column=5, sticky="w", padx=(0, 12))
+
+        ttk.Label(top, text="Status").grid(row=0, column=6, sticky="w")
+        self.status_var = tk.StringVar()
+        ttk.Combobox(top, textvariable=self.status_var, values=["", "draft", "finalized"], width=10, state="readonly").grid(row=0, column=7, sticky="w", padx=(0, 12))
+
+        self.adv_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(top, text="Client fields", variable=self.adv_var, command=self._toggle_adv).grid(row=1, column=0, sticky="w", pady=(10, 0))
+
+        self.client_name_var = tk.StringVar()
+        self.client_company_var = tk.StringVar()
+
+        self.client_name_lbl = ttk.Label(top, text="Client Name")
+        self.client_name_ent = ttk.Entry(top, textvariable=self.client_name_var, width=28)
+        self.client_company_lbl = ttk.Label(top, text="Client Company")
+        self.client_company_ent = ttk.Entry(top, textvariable=self.client_company_var, width=28)
+
+        btns = ttk.Frame(self)
+        btns.pack(fill="x", padx=10)
+
+        ttk.Button(btns, text="Search", command=self.run_search).pack(side="left")
+        ttk.Button(btns, text="New Order", command=lambda: NewOrderDialog(self)).pack(side="left", padx=(10, 0))
+
+        self.show_id_btn = ttk.Button(btns, text="Show Order ID", command=self.enable_order_id_column)
+        self.show_id_btn.pack(side="left", padx=(10, 0))
+
+        self.msg_var = tk.StringVar(value="")
+        ttk.Label(btns, textvariable=self.msg_var).pack(side="right")
+
+        # Tree
+        cols = self._tree_columns()
+        self.tree = ttk.Treeview(self, columns=cols, show="headings", height=22)
+        self._configure_tree_columns()
+
+        self.tree.pack(fill="both", expand=True, padx=10, pady=10)
+        self.tree.bind("<Double-1>", lambda _e: self.open_selected_from_api())
+        ent_artist.bind("<Return>", lambda _e: self.run_search())
+        self._toggle_adv()
+
+    def _tree_columns(self):
+        base = ["Status", "Artist", "Asset", "Notes", "SP", "Revision Of", "Add'l Vers Of"]
+        if self.show_order_id:
+            base.append("Order ID")
+        return base
+
+    def _configure_tree_columns(self):
+        cols = self._tree_columns()
+        self.tree.configure(columns=cols)
+
+        for c in cols:
+            self.tree.heading(c, text=c)
+            if c == "Notes":
+                self.tree.column(c, width=380, anchor="w")
+            elif c == "Artist":
+                self.tree.column(c, width=200, anchor="w")
+            elif c == "Status":
+                self.tree.column(c, width=90, anchor="w")
+            elif c == "Order ID":
+                self.tree.column(c, width=80, anchor="e")
+            else:
+                self.tree.column(c, width=140, anchor="w")
+
+    def _toggle_adv(self):
+        if self.adv_var.get():
+            self.client_name_lbl.grid(row=1, column=1, sticky="w", pady=(10, 0))
+            self.client_name_ent.grid(row=1, column=2, sticky="w", padx=(0, 12), pady=(10, 0))
+            self.client_company_lbl.grid(row=1, column=3, sticky="w", pady=(10, 0))
+            self.client_company_ent.grid(row=1, column=4, sticky="w", padx=(0, 12), pady=(10, 0))
+        else:
+            self.client_name_lbl.grid_forget()
+            self.client_name_ent.grid_forget()
+            self.client_company_lbl.grid_forget()
+            self.client_company_ent.grid_forget()
+
+    def enable_order_id_column(self):
+        if self.show_order_id:
+            return
+        self.show_order_id = True
+        self.show_id_btn.configure(state="disabled")
+
+        # Reset tree with new columns
+        for iid in self.tree.get_children():
+            self.tree.delete(iid)
+        self._configure_tree_columns()
+
+    def _build_search_params(self) -> dict:
+        params = {}
+        artist = (self.artist_var.get() or "").strip()
+        notes = (self.notes_var.get() or "").strip()
+        asset = (self.asset_var.get() or "").strip().lower()
+        status = (self.status_var.get() or "").strip().lower()
+        if artist:
+            params["artist"] = artist
+        if notes:
+            params["notes"] = notes
+        if asset:
+            params["asset_type"] = asset
+        if status:
+            params["status"] = status
+
+        if self.adv_var.get():
+            cn = (self.client_name_var.get() or "").strip()
+            cc = (self.client_company_var.get() or "").strip()
+            if cn:
+                params["client_name"] = cn
+            if cc:
+                params["client_company_name"] = cc
+
+        return params
+
+    def run_search(self, silent: bool = False):
+        params = self._build_search_params()
+        url = f"{API_BASE}/orders/search"
+        if params:
+            url = f"{url}?{urlencode(params)}"
+
+        if not silent:
+            self.msg_var.set("Searching…")
+
+        def worker():
+            try:
+                data = http_get_json(url, timeout=25)
+                items = data.get("value") if isinstance(data, dict) else None
+                if items is None and isinstance(data, list):
+                    items = data
+                if items is None:
+                    items = []
+                self.after(0, lambda: self._apply_results(items, silent=silent))
+            except HTTPError as e:
+                self.after(0, lambda: self._search_fail(_http_error_to_message(e), silent=silent))
+            except URLError as e:
+                self.after(0, lambda: self._search_fail(f"Connection error: {e}", silent=silent))
+            except Exception as e:
+                self.after(0, lambda: self._search_fail(str(e), silent=silent))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _search_fail(self, msg: str, silent: bool):
+        if not silent:
+            self.msg_var.set("Failed.")
+            messagebox.showerror("Search failed", msg)
+
+    def _apply_results(self, items: list, silent: bool):
+        for iid in self.tree.get_children():
+            self.tree.delete(iid)
+
+        cols = self._tree_columns()
+        for row in items:
+            oid = row.get("id")
+            status = (row.get("status") or "").strip()
+            artist = row.get("artist") or ""
+            asset = row.get("asset_type") or ""
+            notes = (row.get("notes") or "")
+            sp = row.get("sp") or {}
+            sp_num = sp.get("sp_number", "") if isinstance(sp, dict) else ""
+            rev = sp.get("revision_of", "") if isinstance(sp, dict) else ""
+            addl = sp.get("additional_version_of", "") if isinstance(sp, dict) else ""
+
+            values = [status, artist, asset, notes, sp_num, rev, addl]
+            if self.show_order_id:
+                values.append(str(oid) if oid is not None else "")
+
+            self.tree.insert("", "end", iid=str(oid), values=values)
+
+        if not silent:
+            self.msg_var.set(f"{len(items)} result(s)")
 
     def open_selected_from_api(self):
-        row = self._get_selected_row()
-        if not row:
-            messagebox.showinfo("Open", "Select a row first.")
+        sel = self.tree.selection()
+        if not sel:
             return
+        order_id = sel[0]
+        try:
+            OrderDetailsWindow(self, int(order_id))
+        except Exception as e:
+            messagebox.showerror("Open failed", str(e))
 
-        order_id = row.get("id")
-        if not order_id:
-            messagebox.showerror("Open", "Selected row is missing an id.")
-            return
 
-        OrderDetailsWindow(self, int(order_id))
+def main():
+    root = OrderSearchGUI()
+    root.mainloop()
 
 
 if __name__ == "__main__":
-    app = OrderSearchGUI()
-    app.mainloop()
+    main()

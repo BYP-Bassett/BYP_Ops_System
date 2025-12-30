@@ -187,6 +187,41 @@ def get_order(order_id: int, db: Session = Depends(get_db)):
     return order
 
 
+@router.delete("/{order_id}")
+def delete_order(
+    order_id: int,
+    initials: str = Query(..., description="Your initials (required)."),
+    force: bool = Query(default=False, description="Allow deleting finalized orders."),
+    db: Session = Depends(get_db),
+):
+    order = db.query(Order).options(joinedload(Order.sp)).filter(Order.id == order_id).first()
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    initials_clean = (initials or "").strip().upper()
+    if not initials_clean or len(initials_clean) > 6 or not initials_clean.isalpha():
+        raise HTTPException(status_code=400, detail="initials must be 1-6 letters")
+
+    if (order.status or "draft") == "finalized" and not force:
+        raise HTTPException(status_code=400, detail="order is finalized; use force=true to delete")
+
+    sp_id = getattr(order, "sp_id", None)
+
+    db.delete(order)
+
+    # If this order was the only one linked to its SP row, delete the SP row too to avoid orphan SPs.
+    if sp_id is not None:
+        other = db.query(Order).filter(Order.sp_id == sp_id, Order.id != order_id).first()
+        if other is None:
+            sp = db.query(SPNumber).filter(SPNumber.id == sp_id).first()
+            if sp is not None:
+                db.delete(sp)
+
+    db.commit()
+
+    return {"status": "deleted", "order_id": order_id, "initials": initials_clean}
+
+
 @router.patch("/{order_id}", response_model=OrderResponse)
 def update_order(
     order_id: int,
