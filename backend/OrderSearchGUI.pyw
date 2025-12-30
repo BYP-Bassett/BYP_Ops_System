@@ -331,9 +331,10 @@ class OrderDetailsWindow(tk.Toplevel):
         add_row(2, 1, "Client Company", 34)
         add_row(2, 2, "Revision Of", 22)
 
-        add_row(4, 0, "Status", 18)
-        add_row(4, 1, "Trello Card ID", 34)
-        add_row(4, 2, "Checklist ID", 34)
+        add_row(4, 0, "Add'l Vers Of", 22)
+        add_row(4, 1, "Status", 18)
+        add_row(4, 2, "Trello Card ID", 34)
+        add_row(6, 2, "Checklist ID", 34)
 
         notes_frame = ttk.Frame(self)
         notes_frame.pack(fill="both", expand=True, padx=10, pady=(0, 10))
@@ -344,7 +345,7 @@ class OrderDetailsWindow(tk.Toplevel):
 
     def _set_entry_state(self, editable: bool):
         for label, (_var, ent) in self.vars.items():
-            if label in ("Asset Type", "SP Number", "Revision Of", "Trello Card ID", "Checklist ID", "Status"):
+            if label in ("Asset Type", "SP Number", "Revision Of", "Add'l Vers Of", "Trello Card ID", "Checklist ID", "Status"):
                 ent.configure(state="readonly")
             else:
                 ent.configure(state="normal" if editable else "readonly")
@@ -385,11 +386,14 @@ class OrderDetailsWindow(tk.Toplevel):
         sp = data.get("sp") if isinstance(data, dict) else None
         sp_number = ""
         sp_revision_of = ""
+        sp_addl_of = ""
         if isinstance(sp, dict):
             sp_number = sp.get("sp_number", "") or ""
             sp_revision_of = sp.get("revision_of", "") or ""
+            sp_addl_of = sp.get("additional_version_of", "") or ""
 
         revision_of = data.get("revision_of") or sp_revision_of or "NEW"
+        addl_of = data.get("additional_version_of") or sp_addl_of or "NEW"
         status = (data.get("status") or "draft").strip().lower()
 
         self.vars["Artist"][0].set(artist)
@@ -398,6 +402,7 @@ class OrderDetailsWindow(tk.Toplevel):
         self.vars["Client Name"][0].set(data.get("client_name", "") or "")
         self.vars["Client Company"][0].set(data.get("client_company_name", "") or "")
         self.vars["Revision Of"][0].set(revision_of)
+        self.vars["Add'l Vers Of"][0].set(addl_of)
 
         self.vars["Status"][0].set(status.upper())
         self.vars["Trello Card ID"][0].set(data.get("trello_card_id", "") or "")
@@ -427,7 +432,47 @@ class OrderDetailsWindow(tk.Toplevel):
         NewOrderDialog(self, prefill_from=self.order_data)
 
     def on_addl_vers(self):
-        messagebox.showinfo("Not yet", "Add'l Vers Of: we’ll define + implement this next.")
+        if not self.order_data:
+            return
+
+        ok = messagebox.askyesno(
+            "Add'l Vers Of",
+            "Create a new ADD'L VERSION order from this one?\n\n"            "This will create a new DRAFT order (same asset_type) with a NEW SP, "
+            "set Add'l Vers Of to this SP, and open it.",
+        )
+        if not ok:
+            return
+
+        self.status_var.set("Creating add’l version…")
+
+        def fail(msg: str):
+            self.status_var.set("Add’l version failed.")
+            messagebox.showerror("Add'l Vers Of failed", msg)
+
+        def worker():
+            try:
+                data = http_post_json(f"{API_BASE}/orders/{self.order_id}/addl_vers", payload=None, timeout=25)
+                new_id = data.get("id") if isinstance(data, dict) else None
+                if not new_id:
+                    raise Exception(f"Unexpected response: {data!r}")
+
+                def open_new():
+                    self.status_var.set("Add’l version created.")
+                    OrderDetailsWindow(self.parent, int(new_id))
+
+                self.after(0, open_new)
+            except HTTPError as e:
+                try:
+                    body = e.read().decode("utf-8", errors="replace")
+                except Exception:
+                    body = str(e)
+                self.after(0, lambda: fail(f"HTTP {e.code}: {body}"))
+            except URLError as e:
+                self.after(0, lambda: fail(f"Connection error: {e}"))
+            except Exception as e:
+                self.after(0, lambda: fail(str(e)))
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def on_revision_of(self):
         if not self.order_data:
@@ -549,6 +594,7 @@ class OrderSearchGUI(tk.Tk):
         self.geometry("1200x640")
 
         self.advanced_visible = tk.BooleanVar(value=False)
+        self.show_order_id = False
         self._build_ui()
 
         self.bind_all("<Return>", self._on_enter_key)
@@ -606,13 +652,16 @@ class OrderSearchGUI(tk.Tk):
         ttk.Button(btns, text="Clear", command=self.on_clear).pack(side="left", padx=(8, 0))
         ttk.Button(btns, text="Ping API", command=self.on_ping).pack(side="left", padx=(8, 0))
 
+        self.show_id_btn = ttk.Button(btns, text="Show Order ID", command=self.on_show_order_id)
+        self.show_id_btn.pack(side="left", padx=(8, 0))
+
         self.status_var = tk.StringVar(value="Ready.")
         ttk.Label(btns, textvariable=self.status_var).pack(side="right")
 
         table_frame = ttk.Frame(self)
         table_frame.pack(fill="both", expand=True, **pad)
 
-        cols = ("artist", "asset_type", "notes", "sp_number", "revision_of", "status")
+        cols = self._current_tree_columns()
         self.tree = ttk.Treeview(table_frame, columns=cols, show="headings", height=18)
         self.tree.pack(side="left", fill="both", expand=True)
 
@@ -620,31 +669,62 @@ class OrderSearchGUI(tk.Tk):
         yscroll.pack(side="right", fill="y")
         self.tree.configure(yscrollcommand=yscroll.set)
 
-        headings = {
+        self._tree_headings = {
+            "status": "Status",
             "artist": "Artist",
             "asset_type": "Asset Type",
             "notes": "Notes",
             "sp_number": "SP Number",
             "revision_of": "Revision Of",
-            "status": "Status",
+            "additional_version_of": "Add'l Vers Of",
+            "order_id": "Order ID",
         }
-        widths = {
+        self._tree_widths = {
+            "status": 90,
             "artist": 240,
             "asset_type": 110,
             "notes": 520,
             "sp_number": 120,
             "revision_of": 140,
-            "status": 90,
+            "additional_version_of": 140,
+            "order_id": 90,
         }
 
-        for c in cols:
-            self.tree.heading(c, text=headings[c])
-            self.tree.column(c, width=widths[c], anchor="w")
+        self._apply_tree_columns()
 
         self.tree.bind("<Double-1>", lambda _e: self.open_selected_from_api())
 
         self._last_rows = []
         top.columnconfigure(1, weight=1)
+
+    
+    def _current_tree_columns(self):
+        base = ("status", "artist", "asset_type", "notes", "sp_number", "revision_of", "additional_version_of")
+        if getattr(self, "show_order_id", False):
+            return base + ("order_id",)
+        return base
+
+    def _apply_tree_columns(self):
+        cols = self._current_tree_columns()
+        self.tree.configure(columns=cols)
+        self.tree["displaycolumns"] = cols
+
+        for c in cols:
+            self.tree.heading(c, text=self._tree_headings.get(c, c))
+            self.tree.column(c, width=self._tree_widths.get(c, 100), anchor="w")
+
+    def on_show_order_id(self):
+        # One-way: add the column, then disable the button (no toggling needed).
+        if getattr(self, "show_order_id", False):
+            return
+        self.show_order_id = True
+
+        if hasattr(self, "show_id_btn") and self.show_id_btn:
+            self.show_id_btn.configure(state="disabled", text="Order ID Shown")
+
+        self._apply_tree_columns()
+        # Re-render current rows so the new column is populated.
+        self._set_rows(self._last_rows)
 
     def toggle_advanced(self):
         if self.advanced_visible.get():
@@ -749,6 +829,21 @@ class OrderSearchGUI(tk.Tk):
 
         return "NEW"
 
+
+    def _extract_addl_version_of(self, r: dict):
+        # Prefer order-level field if it ever exists, otherwise use nested sp.additional_version_of
+        order_addl = r.get("additional_version_of") if isinstance(r, dict) else None
+        if order_addl:
+            return order_addl
+
+        sp = r.get("sp") if isinstance(r, dict) else None
+        if isinstance(sp, dict):
+            sp_addl = sp.get("additional_version_of") or ""
+            if sp_addl:
+                return sp_addl
+
+        return "NEW"
+
     def _set_rows(self, rows):
         self._last_rows = rows or []
         for item in self.tree.get_children():
@@ -757,22 +852,27 @@ class OrderSearchGUI(tk.Tk):
         for idx, r in enumerate(self._last_rows):
             sp_number, _ = self._extract_sp_fields(r)
             revision_of = self._extract_revision_of(r)
+            addl_of = self._extract_addl_version_of(r)
             status = (r.get("status") or "draft").strip().upper()
+            cols = self.tree["columns"]
+            row_values = {
+                "status": status,
+                "artist": r.get("artist", "") or "",
+                "asset_type": r.get("asset_type", "") or "",
+                "notes": (r.get("notes", "") or "").replace("\n", " "),
+                "sp_number": sp_number,
+                "revision_of": revision_of,
+                "additional_version_of": addl_of,
+                "order_id": str(r.get("id", "") or ""),
+            }
+            values = tuple(row_values.get(c, "") for c in cols)
 
             self.tree.insert(
                 "",
                 "end",
                 iid=str(idx),
-                values=(
-                    r.get("artist", "") or "",
-                    r.get("asset_type", "") or "",
-                    (r.get("notes", "") or "").replace("\\n", " "),
-                    sp_number,
-                    revision_of,
-                    status,
-                ),
+                values=values,
             )
-
     def _get_selected_row(self):
         sel = self.tree.selection()
         if not sel:
