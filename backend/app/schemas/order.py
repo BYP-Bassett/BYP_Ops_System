@@ -104,6 +104,7 @@ class SPLink(BaseModel):
     sp_number: str
     order_type: str
     revision_of: Optional[str] = None
+    additional_version_of: Optional[str] = None
 
 
 class OrderResponse(BaseModel):

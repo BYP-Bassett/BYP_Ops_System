@@ -110,7 +110,68 @@ def revise_order(order_id: int, db: Session = Depends(get_db)):
         parent_order_id=parent.id,
         revision_of=(parent.sp.sp_number if getattr(parent, "sp", None) else None),
     )
-    return create_order_service(db, payload)
+
+    new_order = create_order_service(db, payload)
+
+    # Ensure the SP record also tracks the revision chain
+    if getattr(new_order, "sp_id", None):
+        sp = db.query(SPNumber).filter(SPNumber.id == new_order.sp_id).first()
+        if sp:
+            sp.revision_of = (parent.sp.sp_number if getattr(parent, "sp", None) else None)
+            db.commit()
+
+    # Reload with SP joined for consistent API response
+    new_order = (
+        db.query(Order)
+        .options(joinedload(Order.sp))
+        .filter(Order.id == new_order.id)
+        .first()
+    )
+    return new_order
+
+
+@router.post("/{order_id}/addl_vers", response_model=OrderResponse)
+def addl_vers_order(order_id: int, db: Session = Depends(get_db)):
+    parent = db.query(Order).options(joinedload(Order.sp)).filter(Order.id == order_id).first()
+    if not parent:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    payload = OrderCreate(
+        artist=parent.artist,
+        asset_type=parent.asset_type,
+        notes=parent.notes,
+
+        client_name=getattr(parent, "client_name", None),
+        client_company_name=getattr(parent, "client_company_name", None),
+
+        order_type=getattr(parent, "order_type", None),
+        description=getattr(parent, "description", None),
+        length=getattr(parent, "length", None),
+        instructions=getattr(parent, "instructions", None),
+
+        is_revision=False,
+        parent_order_id=parent.id,
+        revision_of=None,
+    )
+
+    new_order = create_order_service(db, payload)
+
+    # Track additional-version chain on the SP record (immediate parent only)
+    if getattr(new_order, "sp_id", None):
+        sp = db.query(SPNumber).filter(SPNumber.id == new_order.sp_id).first()
+        if sp:
+            sp.additional_version_of = (parent.sp.sp_number if getattr(parent, "sp", None) else None)
+            db.commit()
+
+    # Reload with SP joined for consistent API response
+    new_order = (
+        db.query(Order)
+        .options(joinedload(Order.sp))
+        .filter(Order.id == new_order.id)
+        .first()
+    )
+    return new_order
+
 
 
 @router.get("/{order_id}", response_model=OrderResponse)

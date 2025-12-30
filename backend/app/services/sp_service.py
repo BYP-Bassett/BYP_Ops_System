@@ -24,6 +24,7 @@ def generate_next_sp(db: Session, order_type: str):
         created_at=datetime.utcnow(),  # FIXED
         notes=None,
         revision_of=None,
+        additional_version_of=None,
     )
 
     db.add(new_sp)
