@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import json
 import threading
+import os
+import re
 import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog
 from urllib.error import HTTPError, URLError
@@ -17,6 +19,51 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 API_BASE = "http://127.0.0.1:8000"
+
+# -----------------------------
+# GUI state (window size/position)
+# -----------------------------
+_STATE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gui_state.json")
+
+
+def _load_gui_state() -> dict:
+    try:
+        with open(_STATE_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_gui_state(state: dict) -> None:
+    try:
+        tmp = _STATE_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(state, f, indent=2)
+        os.replace(tmp, _STATE_PATH)
+    except Exception:
+        pass
+
+
+def _parse_geometry(geo: str) -> tuple[int, int, int | None, int | None]:
+    """Parse Tk geometry WxH+X+Y."""
+    m = re.match(r"^(\d+)x(\d+)([+-]\d+)?([+-]\d+)?$", (geo or "").strip())
+    if not m:
+        return 0, 0, None, None
+    w = int(m.group(1))
+    h = int(m.group(2))
+    x = int(m.group(3)) if m.group(3) else None
+    y = int(m.group(4)) if m.group(4) else None
+    return w, h, x, y
+
+
+def _format_geometry(w: int, h: int, x: int | None, y: int | None) -> str:
+    if x is None or y is None:
+        return f"{w}x{h}"
+    sx = f"+{x}" if x >= 0 else str(x)
+    sy = f"+{y}" if y >= 0 else str(y)
+    return f"{w}x{h}{sx}{sy}"
+
 
 
 # -----------------------------
@@ -262,6 +309,39 @@ def _safe_get(d: dict, *keys, default=None):
     return cur
 
 
+def _clean_link_field(value) -> str:
+    """Normalize Revision Of / Add'l Vers Of values for display.
+
+    - None, blank, or placeholder-like strings (e.g. 'None', 'NONE', 'NEW', 'null') display as blank.
+    """
+    if value is None:
+        return ""
+    s = str(value).strip()
+    if not s:
+        return ""
+    if s.lower() in ("none", "new", "null"):
+        return ""
+    return s
+
+
+def _normalize_rev_addl(sp: dict) -> tuple[str, str]:
+    """Enforce mutual exclusivity for display.
+
+    - If revision_of is set => additional_version_of displays blank
+    - If additional_version_of is set => revision_of displays blank
+    - If both are set (shouldn't happen), prefer revision_of.
+    """
+    if not isinstance(sp, dict):
+        return "", ""
+    rev = _clean_link_field(sp.get("revision_of"))
+    addl = _clean_link_field(sp.get("additional_version_of"))
+    if rev:
+        addl = ""
+    elif addl:
+        rev = ""
+    return rev, addl
+
+
 # -----------------------------
 # Details window
 # -----------------------------
@@ -274,10 +354,22 @@ class OrderDetailsWindow(tk.Toplevel):
         self._override_mode = False
 
         self.title(f"Order {order_id}")
-        self.geometry("980x760")
+        state = _load_gui_state()
+        geo = state.get("details_geometry")
+        self.geometry(geo if geo else "980x760")
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
 
         self._build_ui()
         self.refresh()
+
+
+    def _on_close(self):
+        try:
+            state = _load_gui_state()
+            state["details_geometry"] = self.winfo_geometry()
+            _save_gui_state(state)
+        finally:
+            self.destroy()
 
     def _build_ui(self):
         header = ttk.Frame(self)
@@ -398,8 +490,9 @@ class OrderDetailsWindow(tk.Toplevel):
         set_field("SP Number", sp.get("sp_number", "") if isinstance(sp, dict) else "")
         set_field("Client Name", data.get("client_name", ""))
         set_field("Client Company", data.get("client_company_name", ""))
-        set_field("Revision Of", sp.get("revision_of", "") if isinstance(sp, dict) else "")
-        set_field("Add'l Vers Of", sp.get("additional_version_of", "") if isinstance(sp, dict) else "")
+        rev, addl = _normalize_rev_addl(sp)
+        set_field("Revision Of", rev)
+        set_field("Add'l Vers Of", addl)
         set_field("Status", status)
         set_field("Trello Card ID", data.get("trello_card_id", ""))
         set_field("Checklist ID", data.get("trello_checklist_id", ""))
@@ -599,11 +692,45 @@ class OrderSearchGUI(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("BYP Ops — Orders")
-        self.geometry("1080x720")
+        self._gui_state = _load_gui_state()
+        geo = self._gui_state.get("main_geometry")
+        self.geometry(geo if geo else "1450x780")
+        self.minsize(1200, 650)
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
 
         self.show_order_id = False
 
         self._build_ui()
+        self.after(50, self._ensure_columns_visible)
+
+
+    def _required_tree_width(self) -> int:
+        cols = self._tree_columns()
+        total = 0
+        for c in cols:
+            try:
+                total += int(self.tree.column(c, "width"))
+            except Exception:
+                total += 120
+        return total + 90  # borders/scrollbar/padding
+
+    def _ensure_columns_visible(self):
+        try:
+            self.update_idletasks()
+            required = self._required_tree_width()
+            w, h, x, y = _parse_geometry(self.winfo_geometry())
+            if w and h and w < required:
+                self.geometry(_format_geometry(required, h, x, y))
+        except Exception:
+            pass
+
+    def _on_close(self):
+        try:
+            state = _load_gui_state()
+            state["main_geometry"] = self.winfo_geometry()
+            _save_gui_state(state)
+        finally:
+            self.destroy()
 
     def _build_ui(self):
         top = ttk.Frame(self)
@@ -704,6 +831,7 @@ class OrderSearchGUI(tk.Tk):
         for iid in self.tree.get_children():
             self.tree.delete(iid)
         self._configure_tree_columns()
+        self._ensure_columns_visible()
 
     def _build_search_params(self) -> dict:
         params = {}
@@ -775,8 +903,7 @@ class OrderSearchGUI(tk.Tk):
             notes = (row.get("notes") or "")
             sp = row.get("sp") or {}
             sp_num = sp.get("sp_number", "") if isinstance(sp, dict) else ""
-            rev = sp.get("revision_of", "") if isinstance(sp, dict) else ""
-            addl = sp.get("additional_version_of", "") if isinstance(sp, dict) else ""
+            rev, addl = _normalize_rev_addl(sp)
 
             values = [status, artist, asset, notes, sp_num, rev, addl]
             if self.show_order_id:
