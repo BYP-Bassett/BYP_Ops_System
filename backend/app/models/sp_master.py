@@ -1,5 +1,7 @@
-from sqlalchemy import Column, Integer, String, DateTime
 from datetime import datetime
+
+from sqlalchemy import Column, DateTime, Integer, String
+
 from app.models.base import Base
 
 
@@ -12,5 +14,6 @@ class SPNumber(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     notes = Column(String, nullable=True)
 
-    # ADD THIS
-    revision_of = Column(String, nullable=True)
+    # Linkage fields (only one should be set for a given SP)
+    revision_of = Column(String, nullable=True)              # parent SP if this is a true revision
+    additional_version_of = Column(String, nullable=True)    # parent SP if this is an additional version
