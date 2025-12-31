@@ -14,6 +14,19 @@ from app.services.trello_service import rebuild_order_checklist, TrelloConfigErr
 
 router = APIRouter(prefix="/orders", tags=["Orders"])
 
+def _prepend_line(text: str | None, first_line: str) -> str:
+    """Prepend a single line to a text blob, keeping existing content below it."""
+    if not first_line:
+        return text or ""
+    existing = text or ""
+    # Avoid duplicating the prefix if it already exists
+    if existing.startswith(first_line):
+        return existing
+    if existing:
+        return f"{first_line}\n{existing}"
+    return first_line
+
+
 
 @router.get("/", response_model=list[OrderResponse])
 def list_orders(db: Session = Depends(get_db)):
@@ -87,16 +100,43 @@ def finalize(
     return finalize_order(db, order, trello_card_id, trello_checklist_id)
 
 
+@router.post("/{order_id}/unfinalize", response_model=OrderResponse)
+def unfinalize_order(order_id: int, db: Session = Depends(get_db)):
+    """Reopen a finalized order back to draft (no Trello required)."""
+    order = (
+        db.query(Order)
+        .options(joinedload(Order.sp))
+        .filter(Order.id == order_id)
+        .first()
+    )
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    # Always force it back to draft, even if it's already draft (idempotent)
+    order.status = "draft"
+    order.finalized_at = None
+
+    db.commit()
+    db.refresh(order)
+    return order
+
+
+
 @router.post("/{order_id}/revise", response_model=OrderResponse)
 def revise_order(order_id: int, db: Session = Depends(get_db)):
     parent = db.query(Order).options(joinedload(Order.sp)).filter(Order.id == order_id).first()
     if not parent:
         raise HTTPException(status_code=404, detail="Order not found")
 
+    parent_sp = (parent.sp.sp_number if getattr(parent, "sp", None) else None)
+    prefix_line = f"Revision of {parent_sp}" if parent_sp else ""
+    child_notes = _prepend_line(parent.notes, prefix_line) if prefix_line else (parent.notes or "")
+    child_instructions = _prepend_line(getattr(parent, "instructions", None), prefix_line) if prefix_line else (getattr(parent, "instructions", None) or "")
+
     payload = OrderCreate(
         artist=parent.artist,
         asset_type=parent.asset_type,
-        notes=parent.notes,
+        notes=child_notes,
 
         client_name=getattr(parent, "client_name", None),
         client_company_name=getattr(parent, "client_company_name", None),
@@ -104,7 +144,7 @@ def revise_order(order_id: int, db: Session = Depends(get_db)):
         order_type=getattr(parent, "order_type", None),
         description=getattr(parent, "description", None),
         length=getattr(parent, "length", None),
-        instructions=getattr(parent, "instructions", None),
+        instructions=child_instructions,
 
         is_revision=True,
         parent_order_id=parent.id,
@@ -136,10 +176,15 @@ def addl_vers_order(order_id: int, db: Session = Depends(get_db)):
     if not parent:
         raise HTTPException(status_code=404, detail="Order not found")
 
+    parent_sp = (parent.sp.sp_number if getattr(parent, "sp", None) else None)
+    prefix_line = f"Add'l vers of {parent_sp}" if parent_sp else ""
+    child_notes = _prepend_line(parent.notes, prefix_line) if prefix_line else (parent.notes or "")
+    child_instructions = _prepend_line(getattr(parent, "instructions", None), prefix_line) if prefix_line else (getattr(parent, "instructions", None) or "")
+
     payload = OrderCreate(
         artist=parent.artist,
         asset_type=parent.asset_type,
-        notes=parent.notes,
+        notes=child_notes,
 
         client_name=getattr(parent, "client_name", None),
         client_company_name=getattr(parent, "client_company_name", None),
@@ -147,7 +192,7 @@ def addl_vers_order(order_id: int, db: Session = Depends(get_db)):
         order_type=getattr(parent, "order_type", None),
         description=getattr(parent, "description", None),
         length=getattr(parent, "length", None),
-        instructions=getattr(parent, "instructions", None),
+        instructions=child_instructions,
 
         is_revision=False,
         parent_order_id=parent.id,
@@ -173,6 +218,44 @@ def addl_vers_order(order_id: int, db: Session = Depends(get_db)):
     return new_order
 
 
+
+
+
+@router.post("/{order_id}/duplicate", response_model=OrderResponse)
+def duplicate_order(order_id: int, db: Session = Depends(get_db)):
+    """Create a fresh draft copy of an order with the same fields (no revision/addl links)."""
+    parent = db.query(Order).options(joinedload(Order.sp)).filter(Order.id == order_id).first()
+    if not parent:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    payload = OrderCreate(
+        artist=parent.artist,
+        asset_type=parent.asset_type,
+        notes=parent.notes,
+
+        client_name=getattr(parent, "client_name", None),
+        client_company_name=getattr(parent, "client_company_name", None),
+
+        order_type=getattr(parent, "order_type", None),
+        description=getattr(parent, "description", None),
+        length=getattr(parent, "length", None),
+        instructions=getattr(parent, "instructions", None),
+
+        is_revision=False,
+        parent_order_id=None,
+        revision_of=None,
+    )
+
+    new_order = create_order_service(db, payload)
+
+    # Reload with SP joined for consistent API response
+    new_order = (
+        db.query(Order)
+        .options(joinedload(Order.sp))
+        .filter(Order.id == new_order.id)
+        .first()
+    )
+    return new_order
 
 @router.get("/{order_id}", response_model=OrderResponse)
 def get_order(order_id: int, db: Session = Depends(get_db)):
@@ -233,9 +316,37 @@ def update_order(
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
 
-    # asset_type is immutable
+    # asset_type is normally immutable.
+    # EXCEPTION: draft "additional version" orders may change asset_type (e.g., radio -> video),
+    # while still linking back to the original via additional_version_of.
     if payload.asset_type is not None and payload.asset_type != order.asset_type:
-        raise HTTPException(status_code=400, detail="asset_type cannot be changed")
+        new_asset = (payload.asset_type or "").strip().lower()
+        if new_asset not in {"radio", "video", "art"}:
+            raise HTTPException(status_code=400, detail="asset_type must be one of: radio, video, art")
+
+        is_finalized = (order.status or "draft") == "finalized"
+        is_addl = False
+        try:
+            is_addl = bool(getattr(getattr(order, "sp", None), "additional_version_of", None))
+        except Exception:
+            is_addl = False
+
+        if is_finalized or not is_addl:
+            raise HTTPException(status_code=400, detail="asset_type cannot be changed")
+
+        order.asset_type = new_asset
+        # Keep SP order_type in sync if present
+        if getattr(order, "sp", None) is not None:
+            try:
+                order.sp.order_type = new_asset
+            except Exception:
+                pass
+        # Some builds also store order_type on the order row
+        if hasattr(order, "order_type"):
+            try:
+                order.order_type = new_asset
+            except Exception:
+                pass
 
     # finalized orders are read-only unless override=true
     if (order.status or "draft") == "finalized" and not override:

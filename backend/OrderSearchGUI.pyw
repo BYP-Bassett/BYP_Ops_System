@@ -10,8 +10,6 @@ from __future__ import annotations
 
 import json
 import threading
-import os
-import re
 import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog
 from urllib.error import HTTPError, URLError
@@ -19,51 +17,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 API_BASE = "http://127.0.0.1:8000"
-
-# -----------------------------
-# GUI state (window size/position)
-# -----------------------------
-_STATE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gui_state.json")
-
-
-def _load_gui_state() -> dict:
-    try:
-        with open(_STATE_PATH, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            return data if isinstance(data, dict) else {}
-    except Exception:
-        return {}
-
-
-def _save_gui_state(state: dict) -> None:
-    try:
-        tmp = _STATE_PATH + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(state, f, indent=2)
-        os.replace(tmp, _STATE_PATH)
-    except Exception:
-        pass
-
-
-def _parse_geometry(geo: str) -> tuple[int, int, int | None, int | None]:
-    """Parse Tk geometry WxH+X+Y."""
-    m = re.match(r"^(\d+)x(\d+)([+-]\d+)?([+-]\d+)?$", (geo or "").strip())
-    if not m:
-        return 0, 0, None, None
-    w = int(m.group(1))
-    h = int(m.group(2))
-    x = int(m.group(3)) if m.group(3) else None
-    y = int(m.group(4)) if m.group(4) else None
-    return w, h, x, y
-
-
-def _format_geometry(w: int, h: int, x: int | None, y: int | None) -> str:
-    if x is None or y is None:
-        return f"{w}x{h}"
-    sx = f"+{x}" if x >= 0 else str(x)
-    sy = f"+{y}" if y >= 0 else str(y)
-    return f"{w}x{h}{sx}{sy}"
-
+ASSET_TYPES = ["radio", "video", "art"]
 
 
 # -----------------------------
@@ -203,7 +157,7 @@ class NewOrderDialog(tk.Toplevel):
 
         ttk.Label(form, text="Asset Type").grid(row=0, column=2, sticky="w")
         self.asset_var = tk.StringVar()
-        ttk.Combobox(form, textvariable=self.asset_var, values=["radio", "video", "art"], width=12, state="readonly").grid(row=0, column=3, sticky="w")
+        ttk.Combobox(form, textvariable=self.asset_var, values=ASSET_TYPES, width=12, state="readonly").grid(row=0, column=3, sticky="w")
 
         ttk.Label(form, text="Client Name").grid(row=1, column=0, sticky="w", pady=(10, 0))
         self.client_name_var = tk.StringVar()
@@ -309,39 +263,6 @@ def _safe_get(d: dict, *keys, default=None):
     return cur
 
 
-def _clean_link_field(value) -> str:
-    """Normalize Revision Of / Add'l Vers Of values for display.
-
-    - None, blank, or placeholder-like strings (e.g. 'None', 'NONE', 'NEW', 'null') display as blank.
-    """
-    if value is None:
-        return ""
-    s = str(value).strip()
-    if not s:
-        return ""
-    if s.lower() in ("none", "new", "null"):
-        return ""
-    return s
-
-
-def _normalize_rev_addl(sp: dict) -> tuple[str, str]:
-    """Enforce mutual exclusivity for display.
-
-    - If revision_of is set => additional_version_of displays blank
-    - If additional_version_of is set => revision_of displays blank
-    - If both are set (shouldn't happen), prefer revision_of.
-    """
-    if not isinstance(sp, dict):
-        return "", ""
-    rev = _clean_link_field(sp.get("revision_of"))
-    addl = _clean_link_field(sp.get("additional_version_of"))
-    if rev:
-        addl = ""
-    elif addl:
-        rev = ""
-    return rev, addl
-
-
 # -----------------------------
 # Details window
 # -----------------------------
@@ -352,24 +273,13 @@ class OrderDetailsWindow(tk.Toplevel):
         self.order_id = order_id
         self.order_data: dict | None = None
         self._override_mode = False
+        self._asset_type_editable = False
 
         self.title(f"Order {order_id}")
-        state = _load_gui_state()
-        geo = state.get("details_geometry")
-        self.geometry(geo if geo else "980x760")
-        self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.geometry("980x760")
 
         self._build_ui()
         self.refresh()
-
-
-    def _on_close(self):
-        try:
-            state = _load_gui_state()
-            state["details_geometry"] = self.winfo_geometry()
-            _save_gui_state(state)
-        finally:
-            self.destroy()
 
     def _build_ui(self):
         header = ttk.Frame(self)
@@ -390,6 +300,7 @@ class OrderDetailsWindow(tk.Toplevel):
 
         ttk.Button(actions, text="New", command=self.on_new).pack(side="left")
         ttk.Button(actions, text="Add'l Vers Of", command=self.on_addl_vers).pack(side="left", padx=(8, 0))
+        ttk.Button(actions, text="Duplicate", command=self.on_duplicate).pack(side="left", padx=(8, 0))
         ttk.Button(actions, text="Revision Of", command=self.on_revision_of).pack(side="left", padx=(8, 0))
 
         ttk.Separator(actions, orient="vertical").pack(side="left", fill="y", padx=10)
@@ -413,12 +324,15 @@ class OrderDetailsWindow(tk.Toplevel):
         body = ttk.Frame(self)
         body.pack(fill="x", padx=10)
 
-        self.vars: dict[str, tuple[tk.StringVar, ttk.Entry]] = {}
+        self.vars: dict[str, tuple[tk.StringVar, ttk.Widget]] = {}
 
         def add_row(row, col, label, width=38):
             ttk.Label(body, text=label).grid(row=row, column=col, sticky="w", pady=(0, 4))
             v = tk.StringVar(value="")
-            e = ttk.Entry(body, textvariable=v, width=width)
+            if label == "Asset Type":
+                e = ttk.Combobox(body, textvariable=v, values=ASSET_TYPES, width=width, state="disabled")
+            else:
+                e = ttk.Entry(body, textvariable=v, width=width)
             e.grid(row=row + 1, column=col, sticky="w", padx=(0, 16), pady=(0, 10))
             self.vars[label] = (v, e)
 
@@ -445,13 +359,19 @@ class OrderDetailsWindow(tk.Toplevel):
 
     def _set_entry_state(self, editable: bool):
         for label, (_v, ent) in self.vars.items():
-            # Asset Type + SP fields are always read-only
-            if label in ("Asset Type", "SP Number", "Revision Of", "Add'l Vers Of", "Status", "Trello Card ID", "Checklist ID"):
+            # Fields that are ALWAYS read-only
+            if label in ("SP Number", "Revision Of", "Add'l Vers Of", "Status", "Trello Card ID", "Checklist ID"):
                 ent.configure(state="readonly")
-            else:
-                ent.configure(state="normal" if editable else "readonly")
+                continue
 
-        self.notes_text.configure(state="normal" if editable else "disabled")
+            # Asset Type is normally read-only, EXCEPT for draft additional-version orders
+            if label == "Asset Type":
+                ent.configure(state=("readonly" if (editable and self._asset_type_editable) else "disabled"))
+                continue
+
+            ent.configure(state=("normal" if editable else "readonly"))
+
+        self.notes_text.configure(state=("normal" if editable else "disabled"))
 
     def refresh(self):
         self.status_var.set("Loading…")
@@ -490,9 +410,8 @@ class OrderDetailsWindow(tk.Toplevel):
         set_field("SP Number", sp.get("sp_number", "") if isinstance(sp, dict) else "")
         set_field("Client Name", data.get("client_name", ""))
         set_field("Client Company", data.get("client_company_name", ""))
-        rev, addl = _normalize_rev_addl(sp)
-        set_field("Revision Of", rev)
-        set_field("Add'l Vers Of", addl)
+        set_field("Revision Of", sp.get("revision_of", "") if isinstance(sp, dict) else "")
+        set_field("Add'l Vers Of", sp.get("additional_version_of", "") if isinstance(sp, dict) else "")
         set_field("Status", status)
         set_field("Trello Card ID", data.get("trello_card_id", ""))
         set_field("Checklist ID", data.get("trello_checklist_id", ""))
@@ -502,7 +421,15 @@ class OrderDetailsWindow(tk.Toplevel):
         self.notes_text.insert("1.0", data.get("notes") or "")
         self.notes_text.configure(state="disabled")
 
+        is_addl = False
+        try:
+            is_addl = bool((sp.get("additional_version_of") or "").strip()) if isinstance(sp, dict) else False
+        except Exception:
+            is_addl = False
+
         editable = (status != "finalized") or self._override_mode
+        # Asset Type can only be edited on *additional versions* (draft), per workflow.
+        self._asset_type_editable = bool(editable and is_addl and status != "finalized")
         self._set_entry_state(editable)
 
         # Buttons states
@@ -529,6 +456,22 @@ class OrderDetailsWindow(tk.Toplevel):
 
         threading.Thread(target=worker, daemon=True).start()
 
+    
+
+    def on_duplicate(self):
+        if not self.order_data:
+            return
+
+        def worker():
+            try:
+                created = http_post_json(f"{API_BASE}/orders/{self.order_id}/duplicate", payload=None, timeout=25)
+                self.after(0, lambda: self._open_new(created))
+            except HTTPError as e:
+                self.after(0, lambda: messagebox.showerror("Duplicate failed", _http_error_to_message(e)))
+            except Exception as e:
+                self.after(0, lambda: messagebox.showerror("Duplicate failed", str(e)))
+
+        threading.Thread(target=worker, daemon=True).start()
     def on_revision_of(self):
         if not self.order_data:
             return
@@ -568,22 +511,47 @@ class OrderDetailsWindow(tk.Toplevel):
 
         ok = messagebox.askyesno(
             "Override edit",
-            "This order is FINALIZED (already processed).\n\nEdit anyway?\n\nSaving will rebuild the Trello checklist.",
+            "This order is FINALIZED (already processed).\n\nReopen it to DRAFT so you can edit + finalize again?",
         )
         if not ok:
             return
 
-        self._override_mode = True
-        self._set_entry_state(True)
-        self.save_btn.configure(state="normal")
-        self.status_var.set("override")
+        # Reopen in backend (no Trello sync) and refresh UI
+        self.edit_btn.configure(state="disabled")
+        self.save_btn.configure(state="disabled")
+        self.status_var.set("Reopening…")
+
+        def worker():
+            try:
+                reopened = http_post_json(f"{API_BASE}/orders/{self.order_id}/unfinalize", payload=None, timeout=25)
+                self.after(0, lambda: self._after_unfinalize(reopened))
+            except HTTPError as e:
+                self.after(0, lambda: self._after_unfinalize_fail(_http_error_to_message(e)))
+            except Exception as e:
+                self.after(0, lambda: self._after_unfinalize_fail(str(e)))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _after_unfinalize(self, reopened: dict):
+        self._override_mode = False
+        self._asset_type_editable = False
+        self._apply_order(reopened)
+        self.status_var.set("Reopened to draft.")
+        if hasattr(self.parent, "run_search"):
+            self.parent.run_search(silent=True)
+
+    def _after_unfinalize_fail(self, msg: str):
+        # Put the button back so you can try again.
+        self.edit_btn.configure(state="normal")
+        self.status_var.set("Failed.")
+        messagebox.showerror("Override failed", msg)
 
     def on_save(self):
         if not self.order_data:
             return
 
         status = (self.order_data.get("status") or "").strip().lower()
-        if status == "finalized" and not self._override_mode:
+        if status == "finalized":
             messagebox.showerror("Read-only", "This order is finalized. Use Override Edit… first.")
             return
 
@@ -593,17 +561,22 @@ class OrderDetailsWindow(tk.Toplevel):
             "client_name": self.vars["Client Name"][0].get().strip() or None,
             "client_company_name": self.vars["Client Company"][0].get().strip() or None,
         }
+        # Asset Type is normally immutable. We only allow editing it for *additional versions*.
+        if getattr(self, "_asset_type_editable", False):
+            at = (self.vars["Asset Type"][0].get() or "").strip().lower()
+            if at:
+                if at not in ("radio", "video", "art"):
+                    messagebox.showerror("Bad asset type", "Asset Type must be: radio, video, or art.")
+                    return
+                payload["asset_type"] = at
 
-        qs = ""
-        if status == "finalized" and self._override_mode:
-            qs = "?override=true"
 
         self.save_btn.configure(state="disabled")
         self.status_var.set("Saving…")
 
         def worker():
             try:
-                updated = http_patch_json(f"{API_BASE}/orders/{self.order_id}{qs}", payload=payload, timeout=30)
+                updated = http_patch_json(f"{API_BASE}/orders/{self.order_id}", payload=payload, timeout=30)
                 self.after(0, lambda: self._after_save(updated))
             except HTTPError as e:
                 self.after(0, lambda: self._after_save_fail(_http_error_to_message(e)))
@@ -614,9 +587,17 @@ class OrderDetailsWindow(tk.Toplevel):
 
     def _after_save(self, updated: dict):
         self.save_btn.configure(state="normal")
-        # override mode should drop back off after save
         self._override_mode = False
-        self._apply_order(updated)
+        self._asset_type_editable = False
+
+        # Refresh from API so the UI never looks "stuck" on Saving…
+        try:
+            fresh = http_get_json(f"{API_BASE}/orders/{self.order_id}", timeout=15)
+        except Exception:
+            fresh = updated
+
+        self._apply_order(fresh)
+        self.status_var.set("Saved.")
         if hasattr(self.parent, "run_search"):
             self.parent.run_search(silent=True)
 
@@ -692,45 +673,17 @@ class OrderSearchGUI(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("BYP Ops — Orders")
-        self._gui_state = _load_gui_state()
-        geo = self._gui_state.get("main_geometry")
-        self.geometry(geo if geo else "1450x780")
-        self.minsize(1200, 650)
-        self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.geometry("1080x720")
 
         self.show_order_id = False
 
+        self._last_items = []
+
         self._build_ui()
-        self.after(50, self._ensure_columns_visible)
 
-
-    def _required_tree_width(self) -> int:
-        cols = self._tree_columns()
-        total = 0
-        for c in cols:
-            try:
-                total += int(self.tree.column(c, "width"))
-            except Exception:
-                total += 120
-        return total + 90  # borders/scrollbar/padding
-
-    def _ensure_columns_visible(self):
-        try:
-            self.update_idletasks()
-            required = self._required_tree_width()
-            w, h, x, y = _parse_geometry(self.winfo_geometry())
-            if w and h and w < required:
-                self.geometry(_format_geometry(required, h, x, y))
-        except Exception:
-            pass
-
-    def _on_close(self):
-        try:
-            state = _load_gui_state()
-            state["main_geometry"] = self.winfo_geometry()
-            _save_gui_state(state)
-        finally:
-            self.destroy()
+        # On launch, show all orders immediately.
+        # (Search endpoint with no filters returns everything.)
+        self.after(150, self.run_search)
 
     def _build_ui(self):
         top = ttk.Frame(self)
@@ -831,7 +784,8 @@ class OrderSearchGUI(tk.Tk):
         for iid in self.tree.get_children():
             self.tree.delete(iid)
         self._configure_tree_columns()
-        self._ensure_columns_visible()
+        # Re-render the current results so the list doesn't go blank
+        self._apply_results(getattr(self, "_last_items", []), silent=True)
 
     def _build_search_params(self) -> dict:
         params = {}
@@ -891,6 +845,7 @@ class OrderSearchGUI(tk.Tk):
             messagebox.showerror("Search failed", msg)
 
     def _apply_results(self, items: list, silent: bool):
+        self._last_items = items or []
         for iid in self.tree.get_children():
             self.tree.delete(iid)
 
@@ -901,9 +856,13 @@ class OrderSearchGUI(tk.Tk):
             artist = row.get("artist") or ""
             asset = row.get("asset_type") or ""
             notes = (row.get("notes") or "")
+            # Treeview cells don't handle multi-line text well; flatten notes for display.
+            _n = notes.replace("\r\n", "\n").replace("\r", "\n")
+            notes = " | ".join([ln.strip() for ln in _n.split("\n") if ln.strip()])
             sp = row.get("sp") or {}
             sp_num = sp.get("sp_number", "") if isinstance(sp, dict) else ""
-            rev, addl = _normalize_rev_addl(sp)
+            rev = sp.get("revision_of", "") if isinstance(sp, dict) else ""
+            addl = sp.get("additional_version_of", "") if isinstance(sp, dict) else ""
 
             values = [status, artist, asset, notes, sp_num, rev, addl]
             if self.show_order_id:
