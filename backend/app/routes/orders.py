@@ -27,6 +27,23 @@ def _prepend_line(text: str | None, first_line: str) -> str:
     return first_line
 
 
+def _default_notes_for_new_order(asset_type: str, existing_notes: str | None) -> str | None:
+    """Return default boilerplate notes for NEW orders by asset_type (radio/video only)."""
+    at = (asset_type or "").strip().lower()
+    if at == "radio":
+        template = "**Voice**\n\n**Music**\n\n**Audio**"
+    elif at == "video":
+        template = "**Voice**\n\n**Music**\n\n**Audio**\n\n**Video**\n\nDrop files here: "
+    else:
+        return None
+
+    existing = existing_notes or ""
+    if existing.strip():
+        # Put template at the top, keep user's content below with a blank line separator.
+        return f"{template}\n\n{existing.lstrip()}"
+    return template
+
+
 
 @router.get("/", response_model=list[OrderResponse])
 def list_orders(db: Session = Depends(get_db)):
@@ -78,6 +95,10 @@ def search_orders(
 
 @router.post("/new", response_model=OrderResponse)
 def create_order(payload: OrderCreate, db: Session = Depends(get_db)):
+    # Auto-prepend default boilerplate for NEW radio/video orders (art excluded).
+    default_notes = _default_notes_for_new_order(payload.asset_type, getattr(payload, "notes", None))
+    if default_notes is not None:
+        payload.notes = default_notes
     return create_order_service(db, payload)
 
 
