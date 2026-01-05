@@ -5,18 +5,6 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 import json
-
-def _audit_details(order, details=None):
-    d = dict(details or {})
-    d.setdefault("order_id", getattr(order, "id", None))
-    d.setdefault("sp_id", getattr(order, "sp_id", None))
-    d.setdefault("sp_number", getattr(getattr(order, "sp", None), "sp_number", None))
-    d.setdefault("artist", getattr(order, "artist", None))
-    d.setdefault("asset_type", getattr(order, "asset_type", None))
-    d.setdefault("status", getattr(order, "status", None))
-    return d
-
-
 import datetime
 from sqlalchemy import or_
 from sqlalchemy.orm import Session, joinedload
