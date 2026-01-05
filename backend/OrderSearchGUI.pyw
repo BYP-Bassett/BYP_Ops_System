@@ -731,7 +731,7 @@ class OrderSearchGUI(tk.Tk):
 
         # Tree
         cols = self._tree_columns()
-        self.tree = ttk.Treeview(self, columns=cols, show="headings", height=22)
+        self.tree = ttk.Treeview(self, columns=cols, show="headings", height=22, selectmode="extended")
         self._configure_tree_columns()
 
         self.tree.pack(fill="both", expand=True, padx=10, pady=10)
@@ -739,6 +739,7 @@ class OrderSearchGUI(tk.Tk):
         # Right-click context menu
         self._init_context_menu()
         self.tree.bind("<Button-3>", self._on_right_click)
+        self.tree.bind("<Delete>", lambda _e: self._ctx_delete())
         ent_artist.bind("<Return>", lambda _e: self.run_search())
         self._toggle_adv()
 
@@ -892,17 +893,22 @@ class OrderSearchGUI(tk.Tk):
         self._rc_menu.add_command(label="Open", command=self._ctx_open)
         self._rc_menu.add_separator()
         self._rc_menu.add_command(label="Delete…", command=self._ctx_delete)
-
     def _on_right_click(self, event):
         # Select the row under the cursor and show menu.
         iid = self.tree.identify_row(event.y)
         if not iid:
             return
+
         try:
-            self.tree.selection_set(iid)
+            current = set(self.tree.selection() or ())
+            # If you right-click a non-selected row, switch selection to that row.
+            # If you right-click an already-selected row, keep the multi-selection.
+            if iid not in current:
+                self.tree.selection_set(iid)
             self.tree.focus(iid)
         except Exception:
             pass
+
         try:
             self._rc_menu.tk_popup(event.x_root, event.y_root)
         finally:
@@ -913,31 +919,50 @@ class OrderSearchGUI(tk.Tk):
 
     def _ctx_open(self):
         self.open_selected_from_api()
-
     def _ctx_delete(self):
-        sel = self.tree.selection()
+        sel = list(self.tree.selection() or [])
         if not sel:
             return
-        iid = sel[0]
-        try:
-            order_id = int(iid)
-        except Exception:
-            messagebox.showerror("Delete failed", "Couldn't determine the selected order id.")
+
+        # Convert iids to order ids and detect finalized rows via Status column (first visible column).
+        order_ids: list[int] = []
+        finalized_ids: list[int] = []
+
+        for iid in sel:
+            try:
+                oid = int(iid)
+            except Exception:
+                continue
+            order_ids.append(oid)
+            try:
+                values = self.tree.item(iid, "values") or []
+                status = (values[0] or "").strip().lower() if values else ""
+                if status == "finalized":
+                    finalized_ids.append(oid)
+            except Exception:
+                pass
+
+        if not order_ids:
+            messagebox.showerror("Delete failed", "Couldn't determine the selected order id(s).")
             return
 
-        # Status is the first visible column in the grid.
-        try:
-            values = self.tree.item(iid, "values") or []
-            status = (values[0] or "").strip().lower() if values else ""
-        except Exception:
-            status = ""
+        count = len(order_ids)
 
-        is_finalized = status == "finalized"
-
-        if is_finalized:
+        # Confirm count (and extra scary warning if any are finalized)
+        if finalized_ids:
             ok = messagebox.askokcancel(
-                "Delete FINALIZED order",
-                "You are about to delete an order that has ALREADY BEEN PROCESSED.\n\nThis is dangerous.\n\nContinue?",
+                "Delete FINALIZED order(s)",
+                f"You selected {count} order(s) to delete.\n\n"
+                f"{len(finalized_ids)} of them are FINALIZED (already processed).\n\n"
+                "This is dangerous.\n\nContinue?",
+                icon="warning",
+            )
+            if not ok:
+                return
+        else:
+            ok = messagebox.askokcancel(
+                "Confirm delete",
+                f"Delete {count} selected order(s)?",
                 icon="warning",
             )
             if not ok:
@@ -953,29 +978,53 @@ class OrderSearchGUI(tk.Tk):
             messagebox.showerror("Cancelled", "Initials are required to delete.")
             return
 
-        if is_finalized:
+        # FINAL double-check if any are finalized
+        if finalized_ids:
             ok2 = messagebox.askokcancel(
                 "Are you sure?",
-                f"FINAL check.\n\nDelete order {order_id}?\n\nInitials: {initials}",
+                "FINAL check.\n\n"
+                f"Delete {count} order(s)?\n"
+                f"Finalized included: {', '.join(map(str, finalized_ids))}\n\n"
+                f"Initials: {initials}",
                 icon="warning",
             )
             if not ok2:
                 return
 
-        qs = {"initials": initials}
-        if is_finalized:
-            qs["force"] = "true"
-
         self.msg_var.set("Deleting…")
 
         def worker():
-            try:
-                http_delete_json(f"{API_BASE}/orders/{order_id}?{urlencode(qs)}", timeout=25)
-                self.after(0, lambda: self._after_ctx_delete_ok(order_id))
-            except HTTPError as e:
-                self.after(0, lambda: self._after_ctx_delete_fail(_http_error_to_message(e)))
-            except Exception as e:
-                self.after(0, lambda: self._after_ctx_delete_fail(str(e)))
+            failures: list[tuple[int, str]] = []
+
+            for oid in order_ids:
+                qs = {"initials": initials}
+                # Force only for finalized ones
+                if oid in finalized_ids:
+                    qs["force"] = "true"
+                try:
+                    http_delete_json(f"{API_BASE}/orders/{oid}?{urlencode(qs)}", timeout=25)
+                except HTTPError as e:
+                    failures.append((oid, _http_error_to_message(e)))
+                except Exception as e:
+                    failures.append((oid, str(e)))
+
+            def done():
+                try:
+                    self.run_search(silent=True)
+                except Exception:
+                    pass
+
+                if failures:
+                    self.msg_var.set("Delete completed with errors.")
+                    details = "\n".join([f"{oid}: {msg}" for oid, msg in failures])
+                    messagebox.showerror(
+                        "Some deletes failed",
+                        f"Deleted {count - len(failures)} of {count} order(s).\n\nFailures:\n{details}",
+                    )
+                else:
+                    self.msg_var.set(f"Deleted {count} order(s).")
+
+            self.after(0, done)
 
         threading.Thread(target=worker, daemon=True).start()
 
