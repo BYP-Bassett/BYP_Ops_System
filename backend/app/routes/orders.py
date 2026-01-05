@@ -3,16 +3,71 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+
+import json
+import datetime
+from sqlalchemy import or_
 from sqlalchemy.orm import Session, joinedload
 
 from app.database.session import get_db
 from app.schemas.order import OrderCreate, OrderUpdate, OrderResponse
 from app.models.orders import Order
 from app.models.sp_master import SPNumber
+from app.models.audit_log import AuditLog
 from app.services.order_service import create_order as create_order_service, finalize_order
 from app.services.trello_service import rebuild_order_checklist, TrelloConfigError
 
 router = APIRouter(prefix="/orders", tags=["Orders"])
+
+def _now_iso() -> str:
+    return datetime.datetime.now().isoformat(timespec="seconds")
+
+
+def _order_snapshot(order: Order) -> dict:
+    sp_num = None
+    try:
+        sp_num = order.sp.sp_number if getattr(order, "sp", None) else None
+    except Exception:
+        sp_num = None
+
+    return {
+        "id": order.id,
+        "artist": order.artist,
+        "asset_type": order.asset_type,
+        "status": getattr(order, "status", None),
+        "sp_number": sp_num,
+        "sp_id": getattr(order, "sp_id", None),
+        "client_name": getattr(order, "client_name", None),
+        "client_company_name": getattr(order, "client_company_name", None),
+        "notes": getattr(order, "notes", None),
+        "instructions": getattr(order, "instructions", None),
+        "trello_card_id": getattr(order, "trello_card_id", None),
+        "trello_checklist_id": getattr(order, "trello_checklist_id", None),
+        "is_deleted": getattr(order, "is_deleted", None),
+        "deleted_at": getattr(order, "deleted_at", None),
+        "deleted_by": getattr(order, "deleted_by", None),
+    }
+
+
+def _audit(
+    db: Session,
+    action: str,
+    actor: str,
+    order: Order | None = None,
+    details: dict | None = None,
+) -> None:
+    payload = details or {}
+    if order is not None:
+        payload.setdefault("order", _order_snapshot(order))
+    row = AuditLog(
+        ts=_now_iso(),
+        action=action,
+        actor=actor,
+        order_id=(order.id if order is not None else None),
+        details_json=json.dumps(payload, ensure_ascii=False),
+    )
+    db.add(row)
+
 
 def _prepend_line(text: str | None, first_line: str) -> str:
     """Prepend a single line to a text blob, keeping existing content below it."""
@@ -46,9 +101,16 @@ def _default_notes_for_new_order(asset_type: str, existing_notes: str | None) ->
 
 
 @router.get("/", response_model=list[OrderResponse])
-def list_orders(db: Session = Depends(get_db)):
+def list_orders(
+    db: Session = Depends(get_db),
+    include_deleted: bool = Query(default=False, description="Include soft-deleted orders (admin use)."),
+):
+    q = db.query(Order)
+    if not include_deleted:
+        q = q.filter(or_(Order.is_deleted == False, Order.is_deleted.is_(None)))
+
     return (
-        db.query(Order)
+        q
         .options(joinedload(Order.sp))
         .order_by(Order.id.desc())
         .all()
@@ -67,8 +129,12 @@ def search_orders(
     client_name: str | None = Query(default=None, description="Client name contains (case-insensitive)."),
     client_company_name: str | None = Query(default=None, description="Client company contains (case-insensitive)."),
     status: str | None = Query(default=None, description="draft or finalized"),
+    include_deleted: bool = Query(default=False, description="Include soft-deleted orders (admin use)."),
 ):
     q = db.query(Order).options(joinedload(Order.sp))
+
+    if not include_deleted:
+        q = q.filter(or_(Order.is_deleted == False, Order.is_deleted.is_(None)))
 
     if artist:
         q = q.filter(Order.artist.ilike(f"%{artist.strip()}%"))
@@ -279,7 +345,11 @@ def duplicate_order(order_id: int, db: Session = Depends(get_db)):
     return new_order
 
 @router.get("/{order_id}", response_model=OrderResponse)
-def get_order(order_id: int, db: Session = Depends(get_db)):
+def get_order(
+    order_id: int,
+    db: Session = Depends(get_db),
+    include_deleted: bool = Query(default=False, description="Include soft-deleted orders (admin use)."),
+):
     order = (
         db.query(Order)
         .options(joinedload(Order.sp))
@@ -288,6 +358,10 @@ def get_order(order_id: int, db: Session = Depends(get_db)):
     )
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
+
+    if not include_deleted and getattr(order, "is_deleted", False):
+        raise HTTPException(status_code=404, detail="Order not found")
+
     return order
 
 
@@ -306,24 +380,30 @@ def delete_order(
     if not initials_clean or len(initials_clean) > 6 or not initials_clean.isalpha():
         raise HTTPException(status_code=400, detail="initials must be 1-6 letters")
 
+    # Idempotent soft-delete
+    if getattr(order, "is_deleted", False):
+        return {"status": "deleted", "order_id": order_id, "initials": initials_clean, "soft": True, "already": True}
+
     if (order.status or "draft") == "finalized" and not force:
         raise HTTPException(status_code=400, detail="order is finalized; use force=true to delete")
 
-    sp_id = getattr(order, "sp_id", None)
+    # Soft delete (do NOT delete SP rows; we want restore + audit later)
+    order.is_deleted = True
+    order.deleted_at = _now_iso()
+    order.deleted_by = initials_clean
 
-    db.delete(order)
-
-    # If this order was the only one linked to its SP row, delete the SP row too to avoid orphan SPs.
-    if sp_id is not None:
-        other = db.query(Order).filter(Order.sp_id == sp_id, Order.id != order_id).first()
-        if other is None:
-            sp = db.query(SPNumber).filter(SPNumber.id == sp_id).first()
-            if sp is not None:
-                db.delete(sp)
+    _audit(
+        db,
+        action="delete",
+        actor=initials_clean,
+        order=order,
+        details={"force": bool(force)},
+    )
 
     db.commit()
+    db.refresh(order)
 
-    return {"status": "deleted", "order_id": order_id, "initials": initials_clean}
+    return {"status": "deleted", "order_id": order_id, "initials": initials_clean, "soft": True}
 
 
 @router.patch("/{order_id}", response_model=OrderResponse)

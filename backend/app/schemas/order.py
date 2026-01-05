@@ -14,6 +14,11 @@ class OrderCreate(BaseModel):
     asset_type: str
     notes: Optional[str] = None
 
+    # soft delete
+    is_deleted: Optional[bool] = None
+    deleted_at: Optional[str] = None
+    deleted_by: Optional[str] = None
+
     # client fields
     client_name: Optional[str] = None
     client_company_name: Optional[str] = None
@@ -49,6 +54,11 @@ class OrderUpdate(BaseModel):
     artist: Optional[str] = None
     asset_type: Optional[str] = None
     notes: Optional[str] = None
+
+    # soft delete
+    is_deleted: Optional[bool] = None
+    deleted_at: Optional[str] = None
+    deleted_by: Optional[str] = None
 
     # client fields
     client_name: Optional[str] = None
@@ -114,6 +124,11 @@ class OrderResponse(BaseModel):
     artist: str
     asset_type: str
     notes: Optional[str] = None
+
+    # soft delete
+    is_deleted: Optional[bool] = None
+    deleted_at: Optional[str] = None
+    deleted_by: Optional[str] = None
 
     client_name: Optional[str] = None
     client_company_name: Optional[str] = None

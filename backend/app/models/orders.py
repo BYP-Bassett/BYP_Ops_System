@@ -43,6 +43,12 @@ class Order(Base):
     trello_card_id = Column(String, nullable=True)
     trello_checklist_id = Column(String, nullable=True)
 
+
+    # Soft delete + audit (foundation for admin panel)
+    is_deleted = Column(Boolean, default=False)
+    deleted_at = Column(String, nullable=True)
+    deleted_by = Column(String, nullable=True)
+
     created_at = Column(String)
 
     # Relationship to SP

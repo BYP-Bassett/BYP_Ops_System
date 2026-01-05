@@ -35,7 +35,7 @@ except Exception:  # pragma: no cover
 # Import models so Alembic "sees" them for autogenerate
 try:
     import importlib
-    for mod in ("app.models.orders", "app.models.sp_master"):
+    for mod in ("app.models.orders", "app.models.sp_master", "app.models.audit_log"):
         try:
             importlib.import_module(mod)
         except Exception:
