@@ -736,6 +736,9 @@ class OrderSearchGUI(tk.Tk):
 
         self.tree.pack(fill="both", expand=True, padx=10, pady=10)
         self.tree.bind("<Double-1>", lambda _e: self.open_selected_from_api())
+        # Right-click context menu
+        self._init_context_menu()
+        self.tree.bind("<Button-3>", self._on_right_click)
         ent_artist.bind("<Return>", lambda _e: self.run_search())
         self._toggle_adv()
 
@@ -882,6 +885,110 @@ class OrderSearchGUI(tk.Tk):
             OrderDetailsWindow(self, int(order_id))
         except Exception as e:
             messagebox.showerror("Open failed", str(e))
+
+    def _init_context_menu(self):
+        # Context menu for the search grid
+        self._rc_menu = tk.Menu(self, tearoff=0)
+        self._rc_menu.add_command(label="Open", command=self._ctx_open)
+        self._rc_menu.add_separator()
+        self._rc_menu.add_command(label="Delete…", command=self._ctx_delete)
+
+    def _on_right_click(self, event):
+        # Select the row under the cursor and show menu.
+        iid = self.tree.identify_row(event.y)
+        if not iid:
+            return
+        try:
+            self.tree.selection_set(iid)
+            self.tree.focus(iid)
+        except Exception:
+            pass
+        try:
+            self._rc_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            try:
+                self._rc_menu.grab_release()
+            except Exception:
+                pass
+
+    def _ctx_open(self):
+        self.open_selected_from_api()
+
+    def _ctx_delete(self):
+        sel = self.tree.selection()
+        if not sel:
+            return
+        iid = sel[0]
+        try:
+            order_id = int(iid)
+        except Exception:
+            messagebox.showerror("Delete failed", "Couldn't determine the selected order id.")
+            return
+
+        # Status is the first visible column in the grid.
+        try:
+            values = self.tree.item(iid, "values") or []
+            status = (values[0] or "").strip().lower() if values else ""
+        except Exception:
+            status = ""
+
+        is_finalized = status == "finalized"
+
+        if is_finalized:
+            ok = messagebox.askokcancel(
+                "Delete FINALIZED order",
+                "You are about to delete an order that has ALREADY BEEN PROCESSED.\n\nThis is dangerous.\n\nContinue?",
+                icon="warning",
+            )
+            if not ok:
+                return
+
+        initials = simpledialog.askstring(
+            "Confirm delete",
+            "Type your initials to confirm deletion:",
+            parent=self,
+        )
+        initials = (initials or "").strip()
+        if not initials:
+            messagebox.showerror("Cancelled", "Initials are required to delete.")
+            return
+
+        if is_finalized:
+            ok2 = messagebox.askokcancel(
+                "Are you sure?",
+                f"FINAL check.\n\nDelete order {order_id}?\n\nInitials: {initials}",
+                icon="warning",
+            )
+            if not ok2:
+                return
+
+        qs = {"initials": initials}
+        if is_finalized:
+            qs["force"] = "true"
+
+        self.msg_var.set("Deleting…")
+
+        def worker():
+            try:
+                http_delete_json(f"{API_BASE}/orders/{order_id}?{urlencode(qs)}", timeout=25)
+                self.after(0, lambda: self._after_ctx_delete_ok(order_id))
+            except HTTPError as e:
+                self.after(0, lambda: self._after_ctx_delete_fail(_http_error_to_message(e)))
+            except Exception as e:
+                self.after(0, lambda: self._after_ctx_delete_fail(str(e)))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _after_ctx_delete_ok(self, order_id: int):
+        try:
+            self.run_search(silent=True)
+        except Exception:
+            pass
+        self.msg_var.set(f"Deleted {order_id}")
+
+    def _after_ctx_delete_fail(self, msg: str):
+        self.msg_var.set("Delete failed.")
+        messagebox.showerror("Delete failed", msg)
 
 
 def main():
