@@ -21,10 +21,9 @@ API_BASE = "http://127.0.0.1:8000"
 ASSET_TYPES = ["radio", "video", "art"]
 
 # Rep display rules:
-# - API/DB stores rep_name (FULL string, e.g. "SB - Steve Bassett")
-# - API/DB stores rep_code (initials, e.g. "SB")
-# - Search grid shows rep_code
-# - Order dropdown shows rep_name (full strings)
+# - API/DB stores FULL strings (e.g., "SB - Steve Bassett")
+# - Search grid shows INITIALS only (e.g., "SB")
+# - Order dropdown shows FULL strings
 REP_FULL = [
     "SB - Steve Bassett",
     "RM - Ron Mewis",
@@ -32,6 +31,9 @@ REP_FULL = [
     "JS - Jon Shults",
     "CD - Celine DeLeon",
 ]
+
+# Rep codes for dropdown filtering in the search window
+REP_CODES = [((r or '').strip().split() or [''])[0] for r in REP_FULL]
 
 def rep_initials(rep_full: str) -> str:
     s = (rep_full or "").strip()
@@ -43,21 +45,6 @@ def rep_initials(rep_full: str) -> str:
         if delim in s:
             return s.split(delim, 1)[0].strip()
     return s.split()[0].strip()
-
-
-def rep_code_from_full(rep_full: str) -> str:
-    """Return rep_code (initials) from a full rep string."""
-    return rep_initials(rep_full)
-
-def rep_full_from_code(rep_code: str) -> str:
-    """Map a rep_code like 'SB' to the canonical full display string."""
-    code = (rep_code or "").strip().upper()
-    if not code:
-        return ""
-    for full in REP_FULL:
-        if rep_code_from_full(full).upper() == code:
-            return full
-    return code
 
 def _prefs_path() -> str:
     """Path to persisted UI prefs (column widths/order) stored next to this script."""
@@ -265,7 +252,6 @@ class NewOrderDialog(tk.Toplevel):
             "asset_type": asset,
             "notes": (self.notes_text.get("1.0", "end") or "").strip(),
             "rep_name": (self.rep_var.get() or REP_FULL[0]).strip(),
-            "rep_code": rep_code_from_full((self.rep_var.get() or REP_FULL[0]).strip()),
         }
         cn = (self.client_name_var.get() or "").strip()
         cco = (self.client_company_var.get() or "").strip()
@@ -489,19 +475,10 @@ class OrderDetailsWindow(tk.Toplevel):
         set_field("Status", status)
         set_field("Trello Card ID", data.get("trello_card_id", ""))
         set_field("Checklist ID", data.get("trello_checklist_id", ""))
-        # Rep (dropdown shows full names; data may contain rep_name and/or rep_code)
-        rep_name_val = (data.get("rep_name") or "").strip()
-        rep_code_val = (data.get("rep_code") or "").strip()
-        rep_display = rep_name_val or (rep_full_from_code(rep_code_val) if rep_code_val else "")
-
+        # Rep
+        rep = (data.get("rep_name") or "").strip()
         if "Rep" in self.vars:
-            if rep_display and rep_display in REP_FULL:
-                self.rep_var.set(rep_display)
-            elif not rep_display:
-                self.rep_var.set(REP_FULL[0])
-            else:
-                # If API sent a non-canonical display string, still show it.
-                self.rep_var.set(rep_display)
+            self.rep_var.set(rep if rep in REP_FULL else (REP_FULL[0] if not rep else rep))
         self.notes_text.configure(state="normal")
         self.notes_text.delete("1.0", "end")
         self.notes_text.insert("1.0", data.get("notes") or "")
@@ -647,7 +624,6 @@ class OrderDetailsWindow(tk.Toplevel):
             "client_name": self.vars["Client Name"][0].get().strip() or None,
             "client_company_name": self.vars["Client Company"][0].get().strip() or None,
             "rep_name": (self.vars.get("Rep", (tk.StringVar(value=REP_FULL[0]), None))[0].get() or REP_FULL[0]).strip(),
-            "rep_code": rep_code_from_full((self.vars.get("Rep", (tk.StringVar(value=REP_FULL[0]), None))[0].get() or REP_FULL[0]).strip()),
         }
         # Asset Type is normally immutable. We only allow editing it for *additional versions*.
         if getattr(self, "_asset_type_editable", False):
@@ -843,19 +819,29 @@ class OrderSearchGUI(tk.Tk):
 
         ttk.Label(top, text="Asset").grid(row=0, column=2, sticky="w")
         self.asset_var = tk.StringVar()
-        ttk.Combobox(top, textvariable=self.asset_var, values=["", "radio", "video", "art"], width=10, state="readonly").grid(row=0, column=3, sticky="w", padx=(0, 12))
+        cb_asset = ttk.Combobox(top, textvariable=self.asset_var, values=["", "radio", "video", "art"], width=10, state="readonly")
+        cb_asset.grid(row=0, column=3, sticky="w", padx=(0, 12))
 
         ttk.Label(top, text="Notes").grid(row=0, column=4, sticky="w")
         self.notes_var = tk.StringVar()
-        ttk.Entry(top, textvariable=self.notes_var, width=28).grid(row=0, column=5, sticky="w", padx=(0, 12))
+        ent_notes = ttk.Entry(top, textvariable=self.notes_var, width=28)
+        ent_notes.grid(row=0, column=5, sticky="w", padx=(0, 12))
 
         ttk.Label(top, text="Status").grid(row=0, column=6, sticky="w")
         self.status_var = tk.StringVar()
-        ttk.Combobox(top, textvariable=self.status_var, values=["", "draft", "finalized"], width=10, state="readonly").grid(row=0, column=7, sticky="w", padx=(0, 12))
+        cb_status = ttk.Combobox(top, textvariable=self.status_var, values=["", "draft", "finalized"], width=10, state="readonly")
+        cb_status.grid(row=0, column=7, sticky="w", padx=(0, 12))
 
         ttk.Label(top, text="Rep").grid(row=0, column=8, sticky="w")
         self.rep_search_var = tk.StringVar()
-        ttk.Entry(top, textvariable=self.rep_search_var, width=8).grid(row=0, column=9, sticky="w", padx=(0, 12))
+        cb_rep = ttk.Combobox(
+            top,
+            textvariable=self.rep_search_var,
+            values=[""] + REP_CODES,
+            width=8,
+            state="readonly",
+        )
+        cb_rep.grid(row=0, column=9, sticky="w", padx=(0, 12))
 
         self.adv_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(top, text="Client fields", variable=self.adv_var, command=self._toggle_adv).grid(row=1, column=0, sticky="w", pady=(10, 0))
@@ -873,6 +859,7 @@ class OrderSearchGUI(tk.Tk):
 
         ttk.Button(btns, text="Search", command=self.run_search).pack(side="left")
         ttk.Button(btns, text="My Drafts", command=self.show_my_drafts).pack(side="left", padx=(10, 0))
+        ttk.Button(btns, text="Clear Search", command=self.clear_search).pack(side="left", padx=(10, 0))
         ttk.Button(btns, text="New Order", command=lambda: NewOrderDialog(self)).pack(side="left", padx=(10, 0))
 
         self.show_id_btn = ttk.Button(btns, text="Show Order ID", command=self.enable_order_id_column)
@@ -892,7 +879,13 @@ class OrderSearchGUI(tk.Tk):
         self._init_context_menu()
         self.tree.bind("<Button-3>", self._on_right_click)
         self.tree.bind("<Delete>", lambda _e: self._ctx_delete())
-        ent_artist.bind("<Return>", lambda _e: self.run_search())
+        # Enter-to-search (because it's not 1994)
+        for w in (ent_artist, ent_notes, cb_asset, cb_status, cb_rep, self.client_name_ent, self.client_company_ent):
+            try:
+                w.bind("<Return>", lambda _e: self.run_search())
+            except Exception:
+                pass
+
         self._toggle_adv()
 
     def _tree_columns(self):
@@ -959,7 +952,7 @@ class OrderSearchGUI(tk.Tk):
         rep = (self.rep_search_var.get() or "").strip()
         if not rep:
             try:
-                self.rep_search_var.set(rep_code_from_full(REP_FULL[0]))
+                self.rep_search_var.set(rep_initials(REP_FULL[0]))
             except Exception:
                 pass
 
@@ -991,6 +984,28 @@ class OrderSearchGUI(tk.Tk):
 
         return params
 
+
+    def clear_search(self):
+        # Reset all search filters to defaults and show all results.
+        if hasattr(self, "artist_var"):
+            self.artist_var.set("")
+        if hasattr(self, "asset_var"):
+            self.asset_var.set("")
+        if hasattr(self, "notes_var"):
+            self.notes_var.set("")
+        if hasattr(self, "status_var"):
+            self.status_var.set("")
+        if hasattr(self, "rep_search_var"):
+            self.rep_search_var.set("")
+        if hasattr(self, "client_name_var"):
+            self.client_name_var.set("")
+        if hasattr(self, "client_company_var"):
+            self.client_company_var.set("")
+        if hasattr(self, "msg_var"):
+            self.msg_var.set("")
+        self.run_search()
+
+
     def run_search(self, silent: bool = False):
         params = self._build_search_params()
         rep_filter = (getattr(self, "rep_search_var", tk.StringVar()).get() or "").strip().upper()
@@ -1010,16 +1025,7 @@ class OrderSearchGUI(tk.Tk):
                 if items is None:
                     items = []
                 if rep_filter:
-                    def _row_rep_code(r: dict) -> str:
-                        if not isinstance(r, dict):
-                            return ""
-                        rc = (r.get("rep_code") or "").strip().upper()
-                        if rc:
-                            return rc
-                        # Back-compat if older API payloads don't include rep_code yet
-                        return rep_code_from_full((r.get("rep_name") or "").strip()).upper()
-
-                    items = [r for r in items if _row_rep_code(r) == rep_filter]
+                    items = [r for r in items if rep_initials((r or {}).get("rep_name", "") or "").upper() == rep_filter]
                 self.after(0, lambda: self._apply_results(items, silent=silent))
             except HTTPError as e:
                 self.after(0, lambda: self._search_fail(_http_error_to_message(e), silent=silent))
@@ -1055,7 +1061,17 @@ class OrderSearchGUI(tk.Tk):
             rev = sp.get("revision_of", "") if isinstance(sp, dict) else ""
             addl = sp.get("additional_version_of", "") if isinstance(sp, dict) else ""
 
-            rep = (row.get("rep_code") or "").strip() or rep_code_from_full((row.get("rep_name") or "").strip())
+            # Hide None/"none" placeholders in the grid (show blank when not applicable)
+            def _blank(v):
+                if v is None:
+                    return ""
+                s = str(v).strip()
+                return "" if s.lower() == "none" else s
+
+            rev = _blank(rev)
+            addl = _blank(addl)
+
+            rep = rep_initials(row.get("rep_name", "") or "")
 
             values = [status, rep, artist, asset, notes, sp_num, rev, addl]
             if self.show_order_id:
