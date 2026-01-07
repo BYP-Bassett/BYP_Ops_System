@@ -348,8 +348,19 @@ def revise_order(
     )
 
     new_order = create_order_service(db, payload)
+    # Carry forward rep fields from parent (create service may apply defaults)
+    if getattr(parent, "rep_name", None) is not None:
+        new_order.rep_name = parent.rep_name
+    if getattr(parent, "rep_code", None) is not None:
+        new_order.rep_code = parent.rep_code
+    db.commit()
+    db.refresh(new_order)
+
 
     # Ensure the SP record also tracks the revision chain
+
+
+
     if getattr(new_order, "sp_id", None):
         sp = db.query(SPNumber).filter(SPNumber.id == new_order.sp_id).first()
         if sp:
@@ -407,6 +418,14 @@ def addl_vers_order(
     )
 
     new_order = create_order_service(db, payload)
+    # Carry forward rep fields from parent (create service may apply defaults)
+    if getattr(parent, "rep_name", None) is not None:
+        new_order.rep_name = parent.rep_name
+    if getattr(parent, "rep_code", None) is not None:
+        new_order.rep_code = parent.rep_code
+    db.commit()
+    db.refresh(new_order)
+
 
     # Track additional-version chain on the SP record (immediate parent only)
     if getattr(new_order, "sp_id", None):
@@ -465,6 +484,14 @@ def duplicate_order(
     )
 
     new_order = create_order_service(db, payload)
+    # Carry forward rep fields from parent (create service may apply defaults)
+    if getattr(parent, "rep_name", None) is not None:
+        new_order.rep_name = parent.rep_name
+    if getattr(parent, "rep_code", None) is not None:
+        new_order.rep_code = parent.rep_code
+    db.commit()
+    db.refresh(new_order)
+
 
     # Reload with SP joined for consistent API response
     new_order = (
