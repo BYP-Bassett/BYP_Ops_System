@@ -14,13 +14,14 @@ class Order(Base):
 
     # Basic fields
     artist = Column(String, index=True)
-    asset_type = Column(String)      # 'radio', 'video', or 'art'
+    asset_type = Column(String)  # 'radio', 'video', or 'art'
     notes = Column(String, nullable=True)
 
-    # Rep tracking (who created/owns the order)
+    # Rep tracking
     rep_name = Column(String(100), nullable=False, server_default=text("'SB - Steve Bassett'"))
+    rep_code = Column(String(10), nullable=False, server_default=text("'SB'"))
 
-    # Client fields (optional)
+    # Client fields
     client_name = Column(String, nullable=True)
     client_company_name = Column(String, nullable=True)
 
@@ -39,15 +40,14 @@ class Order(Base):
     revision_of = Column(String, nullable=True)
 
     # Draft vs finalized workflow
-    status = Column(String, default="draft")           # 'draft' | 'finalized'
+    status = Column(String, default="draft")  # 'draft' | 'finalized'
     finalized_at = Column(String, nullable=True)
 
-    # Trello tracking (only meaningful once finalized)
+    # Trello tracking
     trello_card_id = Column(String, nullable=True)
     trello_checklist_id = Column(String, nullable=True)
 
-
-    # Soft delete + audit (foundation for admin panel)
+    # Soft delete + audit
     is_deleted = Column(Boolean, default=False)
     deleted_at = Column(String, nullable=True)
     deleted_by = Column(String, nullable=True)

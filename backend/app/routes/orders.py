@@ -48,6 +48,7 @@ def _order_snapshot(order: Order) -> dict:
         "asset_type": order.asset_type,
         "status": getattr(order, "status", None),
         "rep_name": getattr(order, "rep_name", None),
+        "rep_code": getattr(order, "rep_code", None),
         "sp_number": sp_num,
         "sp_id": getattr(order, "sp_id", None),
         "client_name": getattr(order, "client_name", None),
@@ -159,6 +160,7 @@ def search_orders(
     client_name: str | None = Query(default=None, description="Client name contains (case-insensitive)."),
     client_company_name: str | None = Query(default=None, description="Client company contains (case-insensitive)."),
     status: str | None = Query(default=None, description="draft or finalized"),
+    rep_code: str | None = Query(default=None, description="Rep initials equals (e.g., SB)."),
     include_deleted: bool = Query(default=False, description="Include soft-deleted orders (admin use)."),
 ):
     q = db.query(Order).options(joinedload(Order.sp))
@@ -178,6 +180,9 @@ def search_orders(
         q = q.filter(Order.client_company_name.ilike(f"%{client_company_name.strip()}%"))
     if status:
         q = q.filter(Order.status == status.strip().lower())
+
+    if rep_code:
+        q = q.filter(Order.rep_code == rep_code.strip().upper())
 
     if sp_number:
         sn = sp_number.strip()
@@ -326,6 +331,7 @@ def revise_order(
         artist=parent.artist,
         asset_type=parent.asset_type,
         rep_name=getattr(parent, "rep_name", None),
+        rep_code=getattr(parent, "rep_code", None),
         notes=child_notes,
 
         client_name=getattr(parent, "client_name", None),
@@ -384,6 +390,7 @@ def addl_vers_order(
         artist=parent.artist,
         asset_type=parent.asset_type,
         rep_name=getattr(parent, "rep_name", None),
+        rep_code=getattr(parent, "rep_code", None),
         notes=child_notes,
 
         client_name=getattr(parent, "client_name", None),
@@ -441,6 +448,7 @@ def duplicate_order(
         artist=parent.artist,
         asset_type=parent.asset_type,
         rep_name=getattr(parent, "rep_name", None),
+        rep_code=getattr(parent, "rep_code", None),
         notes=parent.notes,
 
         client_name=getattr(parent, "client_name", None),
@@ -592,6 +600,7 @@ def update_order(
     for field in [
         "artist",
         "rep_name",
+        "rep_code",
         "notes",
         "client_name",
         "client_company_name",
@@ -656,6 +665,7 @@ def update_order(
             "changes": _diff_dict(before, after, [
                 "artist",
                 "rep_name",
+                "rep_code",
                 "asset_type",
                 "notes",
                 "client_name",

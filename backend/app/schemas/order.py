@@ -16,6 +16,8 @@ class OrderCreate(BaseModel):
 
     rep_name: Optional[str] = "SB - Steve Bassett"
 
+    rep_code: Optional[str] = "SB"
+
     # soft delete
     is_deleted: Optional[bool] = None
     deleted_at: Optional[str] = None
@@ -58,6 +60,8 @@ class OrderUpdate(BaseModel):
     notes: Optional[str] = None
 
     rep_name: Optional[str] = None
+
+    rep_code: Optional[str] = None
 
     # soft delete
     is_deleted: Optional[bool] = None
@@ -130,6 +134,8 @@ class OrderResponse(BaseModel):
     notes: Optional[str] = None
 
     rep_name: str
+
+    rep_code: str
 
     # soft delete
     is_deleted: Optional[bool] = None

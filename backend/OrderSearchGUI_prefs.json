@@ -1,12 +1,13 @@
 {
   "column_widths": {
-    "Status": 41,
-    "Rep": 31,
-    "Artist": 256,
-    "Asset": 68,
-    "Notes": 410,
-    "SP": 88,
-    "Revision Of": 81,
-    "Add'l Vers Of": 83
+    "Status": 46,
+    "Rep": 35,
+    "Artist": 261,
+    "Asset": 72,
+    "Notes": 413,
+    "SP": 90,
+    "Revision Of": 84,
+    "Add'l Vers Of": 89,
+    "Order ID": 75
   }
 }
