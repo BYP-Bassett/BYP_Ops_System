@@ -737,7 +737,38 @@ class OrderSearchGUI(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("BYP Ops — Orders")
-        self.geometry("1080x720")
+
+        # Default size (overridden if we have a saved window geometry)
+        default_geometry = "1080x720"
+        saved_geo = None
+        try:
+            _p = self._load_prefs()
+            saved_geo = (_p or {}).get("window_geometry")
+        except Exception:
+            saved_geo = None
+
+        if isinstance(saved_geo, str) and "x" in saved_geo:
+            try:
+                self.geometry(saved_geo)
+            except Exception:
+                self.geometry(default_geometry)
+        else:
+            self.geometry(default_geometry)
+
+        # Restore maximized state if it was last used
+        try:
+            saved_state = None
+            try:
+                _p = getattr(self, "_prefs", None)
+                if not isinstance(_p, dict):
+                    _p = self._load_prefs()
+                saved_state = (_p or {}).get("window_state")
+            except Exception:
+                saved_state = None
+            if saved_state == "zoomed":
+                self.after(0, lambda: self.state("zoomed"))
+        except Exception:
+            pass
 
         self.show_order_id = False
 
@@ -804,6 +835,17 @@ class OrderSearchGUI(tk.Tk):
     def _on_close(self):
         prefs = dict(getattr(self, "_prefs", {}) or {})
         prefs["column_widths"] = self._gather_column_widths()
+
+        # Persist window size/position so it opens the way you left it.
+        try:
+            prefs["window_geometry"] = self.winfo_geometry()
+        except Exception:
+            pass
+        try:
+            prefs["window_state"] = self.state()
+        except Exception:
+            pass
+
         # Column order will be stored here later as prefs["displaycolumns"]
         self._save_prefs(prefs)
         self.destroy()
@@ -814,7 +856,7 @@ class OrderSearchGUI(tk.Tk):
 
         ttk.Label(top, text="Artist").grid(row=0, column=0, sticky="w")
         self.artist_var = tk.StringVar()
-        ent_artist = ttk.Entry(top, textvariable=self.artist_var, width=28)
+        ent_artist = ttk.Entry(top, textvariable=self.artist_var, width=34)
         ent_artist.grid(row=0, column=1, sticky="w", padx=(0, 12))
 
         ttk.Label(top, text="Asset").grid(row=0, column=2, sticky="w")
@@ -844,29 +886,48 @@ class OrderSearchGUI(tk.Tk):
         cb_rep.grid(row=0, column=9, sticky="w", padx=(0, 12))
 
         self.adv_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(top, text="Client fields", variable=self.adv_var, command=self._toggle_adv).grid(row=1, column=0, sticky="w", pady=(10, 0))
+        ttk.Checkbutton(top, text="Client fields", variable=self.adv_var, command=self._toggle_adv).grid(row=0, column=10, sticky="w")
 
         self.client_name_var = tk.StringVar()
         self.client_company_var = tk.StringVar()
+        # Advanced (client) fields live in their own sub-frame so they DON'T resize/shift the top row.
+        self.adv_frame = ttk.Frame(top)
 
-        self.client_name_lbl = ttk.Label(top, text="Client Name")
-        self.client_name_ent = ttk.Entry(top, textvariable=self.client_name_var, width=28)
-        self.client_company_lbl = ttk.Label(top, text="Client Company")
-        self.client_company_ent = ttk.Entry(top, textvariable=self.client_company_var, width=28)
+        self.client_name_lbl = ttk.Label(self.adv_frame, text="Client Name")
+        self.client_name_ent = ttk.Entry(self.adv_frame, textvariable=self.client_name_var, width=34)
+
+        self.client_company_lbl = ttk.Label(self.adv_frame, text="Client Company")
+        self.client_company_ent = ttk.Entry(self.adv_frame, textvariable=self.client_company_var, width=34)
+
+        # Layout inside the adv_frame (single row)
+        self.client_name_lbl.grid(row=0, column=0, sticky="w")
+        self.client_name_ent.grid(row=0, column=1, sticky="w", padx=(0, 12))
+
+        self.client_company_lbl.grid(row=0, column=2, sticky="w")
+        self.client_company_ent.grid(row=0, column=3, sticky="w", padx=(0, 12))
 
         btns = ttk.Frame(self)
-        btns.pack(fill="x", padx=10)
+        btns.pack(fill="x", padx=10)        # Buttons (grouped to reduce misclicks)
+        btns_left = ttk.Frame(btns)
+        btns_left.pack(side="left")
 
-        ttk.Button(btns, text="Search", command=self.run_search).pack(side="left")
-        ttk.Button(btns, text="My Drafts", command=self.show_my_drafts).pack(side="left", padx=(10, 0))
-        ttk.Button(btns, text="Clear Search", command=self.clear_search).pack(side="left", padx=(10, 0))
-        ttk.Button(btns, text="New Order", command=lambda: NewOrderDialog(self)).pack(side="left", padx=(10, 0))
+        ttk.Button(btns_left, text="My Drafts", command=self.show_my_drafts).pack(side="left")
+        ttk.Button(btns_left, text="Search", command=self.run_search).pack(side="left", padx=(10, 0))
+        ttk.Button(btns_left, text="Clear Search", command=self.clear_search).pack(side="left", padx=(6, 0))
 
-        self.show_id_btn = ttk.Button(btns, text="Show Order ID", command=self.enable_order_id_column)
-        self.show_id_btn.pack(side="left", padx=(10, 0))
+        btns_mid = ttk.Frame(btns)
+        btns_mid.pack(side="left", fill="x", expand=True)
+
+        ttk.Button(btns_mid, text="New Order", command=lambda: NewOrderDialog(self)).pack()
+
+        btns_right = ttk.Frame(btns)
+        btns_right.pack(side="right")
 
         self.msg_var = tk.StringVar(value="")
-        ttk.Label(btns, textvariable=self.msg_var).pack(side="right")
+        ttk.Label(btns_right, textvariable=self.msg_var).pack(side="right")
+
+        self.show_id_btn = ttk.Button(btns_right, text="Show Order ID", command=self.enable_order_id_column)
+        self.show_id_btn.pack(side="right", padx=(0, 10))
 
         # Tree
         cols = self._tree_columns()
@@ -879,7 +940,7 @@ class OrderSearchGUI(tk.Tk):
         self._init_context_menu()
         self.tree.bind("<Button-3>", self._on_right_click)
         self.tree.bind("<Delete>", lambda _e: self._ctx_delete())
-        # Enter-to-search (because it's not 1994)
+                # Enter-to-search (because it's not 1994)
         for w in (ent_artist, ent_notes, cb_asset, cb_status, cb_rep, self.client_name_ent, self.client_company_ent):
             try:
                 w.bind("<Return>", lambda _e: self.run_search())
@@ -917,16 +978,15 @@ class OrderSearchGUI(tk.Tk):
         self._apply_saved_column_widths(cols)
 
     def _toggle_adv(self):
+        # Show/hide the advanced client fields row without shifting the top row layout.
         if self.adv_var.get():
-            self.client_name_lbl.grid(row=1, column=1, sticky="w", pady=(10, 0))
-            self.client_name_ent.grid(row=1, column=2, sticky="w", padx=(0, 12), pady=(10, 0))
-            self.client_company_lbl.grid(row=1, column=3, sticky="w", pady=(10, 0))
-            self.client_company_ent.grid(row=1, column=4, sticky="w", padx=(0, 12), pady=(10, 0))
+            self.adv_frame.grid(row=1, column=0, columnspan=20, sticky="w", pady=(10, 0))
         else:
-            self.client_name_lbl.grid_forget()
-            self.client_name_ent.grid_forget()
-            self.client_company_lbl.grid_forget()
-            self.client_company_ent.grid_forget()
+            try:
+                self.adv_frame.grid_remove()
+            except Exception:
+                pass
+
 
     def enable_order_id_column(self):
         if self.show_order_id:
