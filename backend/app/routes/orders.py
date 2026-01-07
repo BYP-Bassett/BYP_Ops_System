@@ -47,6 +47,7 @@ def _order_snapshot(order: Order) -> dict:
         "artist": order.artist,
         "asset_type": order.asset_type,
         "status": getattr(order, "status", None),
+        "rep_name": getattr(order, "rep_name", None),
         "sp_number": sp_num,
         "sp_id": getattr(order, "sp_id", None),
         "client_name": getattr(order, "client_name", None),
@@ -324,6 +325,7 @@ def revise_order(
     payload = OrderCreate(
         artist=parent.artist,
         asset_type=parent.asset_type,
+        rep_name=getattr(parent, "rep_name", None),
         notes=child_notes,
 
         client_name=getattr(parent, "client_name", None),
@@ -381,6 +383,7 @@ def addl_vers_order(
     payload = OrderCreate(
         artist=parent.artist,
         asset_type=parent.asset_type,
+        rep_name=getattr(parent, "rep_name", None),
         notes=child_notes,
 
         client_name=getattr(parent, "client_name", None),
@@ -437,6 +440,7 @@ def duplicate_order(
     payload = OrderCreate(
         artist=parent.artist,
         asset_type=parent.asset_type,
+        rep_name=getattr(parent, "rep_name", None),
         notes=parent.notes,
 
         client_name=getattr(parent, "client_name", None),
@@ -587,6 +591,7 @@ def update_order(
     touched_fields: list[str] = []
     for field in [
         "artist",
+        "rep_name",
         "notes",
         "client_name",
         "client_company_name",
@@ -650,6 +655,7 @@ def update_order(
             "after": after,
             "changes": _diff_dict(before, after, [
                 "artist",
+                "rep_name",
                 "asset_type",
                 "notes",
                 "client_name",

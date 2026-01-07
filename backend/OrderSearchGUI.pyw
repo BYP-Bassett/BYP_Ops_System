@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog
@@ -18,6 +19,38 @@ from urllib.request import Request, urlopen
 
 API_BASE = "http://127.0.0.1:8000"
 ASSET_TYPES = ["radio", "video", "art"]
+
+# Rep display rules:
+# - API/DB stores FULL strings (e.g., "SB - Steve Bassett")
+# - Search grid shows INITIALS only (e.g., "SB")
+# - Order dropdown shows FULL strings
+REP_FULL = [
+    "SB - Steve Bassett",
+    "RM - Ron Mewis",
+    "AML - Allison Lineberry",
+    "JS - Jon Shults",
+    "CD - Celine DeLeon",
+]
+
+def rep_initials(rep_full: str) -> str:
+    s = (rep_full or "").strip()
+    if not s:
+        return ""
+    # Typical: "SB - Steve Bassett" or "SB = Steve Bassett"
+    # Grab the token before the first space/delimiter.
+    for delim in ("-", "=", "—"):
+        if delim in s:
+            return s.split(delim, 1)[0].strip()
+    return s.split()[0].strip()
+
+def _prefs_path() -> str:
+    """Path to persisted UI prefs (column widths/order) stored next to this script."""
+    try:
+        base = os.path.dirname(os.path.abspath(__file__))
+    except Exception:
+        base = os.getcwd()
+    return os.path.join(base, "OrderSearchGUI_prefs.json")
+
 
 
 # -----------------------------
@@ -167,6 +200,15 @@ class NewOrderDialog(tk.Toplevel):
         self.client_company_var = tk.StringVar()
         ttk.Entry(form, textvariable=self.client_company_var, width=34).grid(row=1, column=3, sticky="w", pady=(10, 0))
 
+        ttk.Label(form, text="Rep").grid(row=2, column=0, sticky="w", pady=(10, 0))
+        self.rep_var = tk.StringVar(value=REP_FULL[0])
+        ttk.Combobox(
+            form,
+            textvariable=self.rep_var,
+            values=REP_FULL,
+            width=44,
+            state="readonly",
+        ).grid(row=2, column=1, columnspan=3, sticky="w", pady=(10, 0))
         notes_frame = ttk.Frame(self)
         notes_frame.pack(fill="both", expand=True, padx=10, pady=(10, 10))
         ttk.Label(notes_frame, text="Notes").pack(anchor="w")
@@ -187,6 +229,8 @@ class NewOrderDialog(tk.Toplevel):
         self.asset_var.set(asset)
         self.client_name_var.set((self.prefill.get("client_name") or "").strip())
         self.client_company_var.set((self.prefill.get("client_company_name") or "").strip())
+        rep = (self.prefill.get("rep_name") or "").strip()
+        self.rep_var.set(rep if rep in REP_FULL else REP_FULL[0])
         self.notes_text.delete("1.0", "end")
         self.notes_text.insert("1.0", "")
 
@@ -204,6 +248,7 @@ class NewOrderDialog(tk.Toplevel):
             "artist": artist,
             "asset_type": asset,
             "notes": (self.notes_text.get("1.0", "end") or "").strip(),
+            "rep_name": (self.rep_var.get() or REP_FULL[0]).strip(),
         }
         cn = (self.client_name_var.get() or "").strip()
         cco = (self.client_company_var.get() or "").strip()
@@ -350,6 +395,13 @@ class OrderDetailsWindow(tk.Toplevel):
 
         add_row(6, 2, "Checklist ID", 34)
 
+        # Rep (full names shown here; search grid shows initials)
+        ttk.Label(body, text="Rep").grid(row=6, column=0, sticky="w", pady=(10, 0))
+        self.rep_var = tk.StringVar()
+        self.rep_cb = ttk.Combobox(body, textvariable=self.rep_var, values=REP_FULL, width=30, state="disabled")
+        self.rep_cb.grid(row=7, column=0, sticky="w", pady=(0, 10), padx=(0, 16))
+        self.vars["Rep"] = (self.rep_var, self.rep_cb)
+
         notes_frame = ttk.Frame(self)
         notes_frame.pack(fill="both", expand=True, padx=10, pady=(0, 10))
         ttk.Label(notes_frame, text="Notes").pack(anchor="w")
@@ -367,6 +419,11 @@ class OrderDetailsWindow(tk.Toplevel):
             # Asset Type is normally read-only, EXCEPT for draft additional-version orders
             if label == "Asset Type":
                 ent.configure(state=("readonly" if (editable and self._asset_type_editable) else "disabled"))
+                continue
+
+            if label == "Rep":
+                # Rep is a dropdown: allow selecting when editable, otherwise lock it.
+                ent.configure(state=("readonly" if editable else "disabled"))
                 continue
 
             ent.configure(state=("normal" if editable else "readonly"))
@@ -415,7 +472,10 @@ class OrderDetailsWindow(tk.Toplevel):
         set_field("Status", status)
         set_field("Trello Card ID", data.get("trello_card_id", ""))
         set_field("Checklist ID", data.get("trello_checklist_id", ""))
-
+        # Rep
+        rep = (data.get("rep_name") or "").strip()
+        if "Rep" in self.vars:
+            self.rep_var.set(rep if rep in REP_FULL else (REP_FULL[0] if not rep else rep))
         self.notes_text.configure(state="normal")
         self.notes_text.delete("1.0", "end")
         self.notes_text.insert("1.0", data.get("notes") or "")
@@ -560,6 +620,7 @@ class OrderDetailsWindow(tk.Toplevel):
             "notes": (self.notes_text.get("1.0", "end") or "").strip(),
             "client_name": self.vars["Client Name"][0].get().strip() or None,
             "client_company_name": self.vars["Client Company"][0].get().strip() or None,
+            "rep_name": (self.vars.get("Rep", (tk.StringVar(value=REP_FULL[0]), None))[0].get() or REP_FULL[0]).strip(),
         }
         # Asset Type is normally immutable. We only allow editing it for *additional versions*.
         if getattr(self, "_asset_type_editable", False):
@@ -679,11 +740,70 @@ class OrderSearchGUI(tk.Tk):
 
         self._last_items = []
 
+        # Load UI preferences (column widths now; column order later)
+        self._prefs = self._load_prefs()
+        self._col_widths = dict(self._prefs.get("column_widths") or {})
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+
         self._build_ui()
 
         # On launch, show all orders immediately.
         # (Search endpoint with no filters returns everything.)
         self.after(150, self.run_search)
+
+
+    # -----------------------------
+    # UI preferences
+    # -----------------------------
+    def _load_prefs(self) -> dict:
+        path = _prefs_path()
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else {}
+        except FileNotFoundError:
+            return {}
+        except Exception:
+            # Don't crash the app over a bad prefs file.
+            return {}
+
+    def _save_prefs(self, data: dict) -> None:
+        path = _prefs_path()
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+        except Exception:
+            # Preferences are nice-to-have. If save fails, shrug and move on.
+            pass
+
+    def _gather_column_widths(self) -> dict:
+        widths = {}
+        try:
+            for col in self.tree["columns"]:
+                w = self.tree.column(col, "width")
+                try:
+                    widths[col] = int(w)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        return widths
+
+    def _apply_saved_column_widths(self, cols: list[str]) -> None:
+        for col in cols:
+            w = self._col_widths.get(col)
+            if isinstance(w, int) and 30 <= w <= 1400:
+                try:
+                    self.tree.column(col, width=w)
+                except Exception:
+                    pass
+
+    def _on_close(self):
+        prefs = dict(getattr(self, "_prefs", {}) or {})
+        prefs["column_widths"] = self._gather_column_widths()
+        # Column order will be stored here later as prefs["displaycolumns"]
+        self._save_prefs(prefs)
+        self.destroy()
 
     def _build_ui(self):
         top = ttk.Frame(self)
@@ -706,6 +826,10 @@ class OrderSearchGUI(tk.Tk):
         self.status_var = tk.StringVar()
         ttk.Combobox(top, textvariable=self.status_var, values=["", "draft", "finalized"], width=10, state="readonly").grid(row=0, column=7, sticky="w", padx=(0, 12))
 
+        ttk.Label(top, text="Rep").grid(row=0, column=8, sticky="w")
+        self.rep_search_var = tk.StringVar()
+        ttk.Entry(top, textvariable=self.rep_search_var, width=8).grid(row=0, column=9, sticky="w", padx=(0, 12))
+
         self.adv_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(top, text="Client fields", variable=self.adv_var, command=self._toggle_adv).grid(row=1, column=0, sticky="w", pady=(10, 0))
 
@@ -721,6 +845,7 @@ class OrderSearchGUI(tk.Tk):
         btns.pack(fill="x", padx=10)
 
         ttk.Button(btns, text="Search", command=self.run_search).pack(side="left")
+        ttk.Button(btns, text="My Drafts", command=self.show_my_drafts).pack(side="left", padx=(10, 0))
         ttk.Button(btns, text="New Order", command=lambda: NewOrderDialog(self)).pack(side="left", padx=(10, 0))
 
         self.show_id_btn = ttk.Button(btns, text="Show Order ID", command=self.enable_order_id_column)
@@ -744,7 +869,7 @@ class OrderSearchGUI(tk.Tk):
         self._toggle_adv()
 
     def _tree_columns(self):
-        base = ["Status", "Artist", "Asset", "Notes", "SP", "Revision Of", "Add'l Vers Of"]
+        base = ["Status", "Rep", "Artist", "Asset", "Notes", "SP", "Revision Of", "Add'l Vers Of"]
         if self.show_order_id:
             base.append("Order ID")
         return base
@@ -761,10 +886,15 @@ class OrderSearchGUI(tk.Tk):
                 self.tree.column(c, width=200, anchor="w")
             elif c == "Status":
                 self.tree.column(c, width=90, anchor="w")
+            elif c == "Rep":
+                self.tree.column(c, width=60, anchor="w")
             elif c == "Order ID":
                 self.tree.column(c, width=80, anchor="e")
             else:
                 self.tree.column(c, width=140, anchor="w")
+
+
+        self._apply_saved_column_widths(cols)
 
     def _toggle_adv(self):
         if self.adv_var.get():
@@ -790,6 +920,24 @@ class OrderSearchGUI(tk.Tk):
         self._configure_tree_columns()
         # Re-render the current results so the list doesn't go blank
         self._apply_results(getattr(self, "_last_items", []), silent=True)
+
+    def show_my_drafts(self):
+        # Convenience: show draft orders for the rep in the Rep box (initials).
+        # If Rep box is empty, default to the first rep in REP_FULL.
+        try:
+            self.status_var.set("draft")
+        except Exception:
+            pass
+
+        rep = (self.rep_search_var.get() or "").strip()
+        if not rep:
+            try:
+                self.rep_search_var.set(rep_initials(REP_FULL[0]))
+            except Exception:
+                pass
+
+        self.run_search()
+
 
     def _build_search_params(self) -> dict:
         params = {}
@@ -818,6 +966,7 @@ class OrderSearchGUI(tk.Tk):
 
     def run_search(self, silent: bool = False):
         params = self._build_search_params()
+        rep_filter = (getattr(self, "rep_search_var", tk.StringVar()).get() or "").strip().upper()
         url = f"{API_BASE}/orders/search"
         if params:
             url = f"{url}?{urlencode(params)}"
@@ -833,6 +982,8 @@ class OrderSearchGUI(tk.Tk):
                     items = data
                 if items is None:
                     items = []
+                if rep_filter:
+                    items = [r for r in items if rep_initials((r or {}).get("rep_name", "") or "").upper() == rep_filter]
                 self.after(0, lambda: self._apply_results(items, silent=silent))
             except HTTPError as e:
                 self.after(0, lambda: self._search_fail(_http_error_to_message(e), silent=silent))
@@ -868,7 +1019,9 @@ class OrderSearchGUI(tk.Tk):
             rev = sp.get("revision_of", "") if isinstance(sp, dict) else ""
             addl = sp.get("additional_version_of", "") if isinstance(sp, dict) else ""
 
-            values = [status, artist, asset, notes, sp_num, rev, addl]
+            rep = rep_initials(row.get("rep_name", "") or "")
+
+            values = [status, rep, artist, asset, notes, sp_num, rev, addl]
             if self.show_order_id:
                 values.append(str(oid) if oid is not None else "")
 
@@ -1047,3 +1200,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

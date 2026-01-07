@@ -1,6 +1,6 @@
 # app/models/orders.py
 
-from sqlalchemy import Column, Integer, String, Boolean, ForeignKey
+from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, text
 from sqlalchemy.orm import relationship
 
 from app.models.base import Base
@@ -16,6 +16,9 @@ class Order(Base):
     artist = Column(String, index=True)
     asset_type = Column(String)      # 'radio', 'video', or 'art'
     notes = Column(String, nullable=True)
+
+    # Rep tracking (who created/owns the order)
+    rep_name = Column(String(100), nullable=False, server_default=text("'SB - Steve Bassett'"))
 
     # Client fields (optional)
     client_name = Column(String, nullable=True)

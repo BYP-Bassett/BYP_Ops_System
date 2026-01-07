@@ -14,6 +14,8 @@ class OrderCreate(BaseModel):
     asset_type: str
     notes: Optional[str] = None
 
+    rep_name: Optional[str] = "SB - Steve Bassett"
+
     # soft delete
     is_deleted: Optional[bool] = None
     deleted_at: Optional[str] = None
@@ -54,6 +56,8 @@ class OrderUpdate(BaseModel):
     artist: Optional[str] = None
     asset_type: Optional[str] = None
     notes: Optional[str] = None
+
+    rep_name: Optional[str] = None
 
     # soft delete
     is_deleted: Optional[bool] = None
@@ -124,6 +128,8 @@ class OrderResponse(BaseModel):
     artist: str
     asset_type: str
     notes: Optional[str] = None
+
+    rep_name: str
 
     # soft delete
     is_deleted: Optional[bool] = None
