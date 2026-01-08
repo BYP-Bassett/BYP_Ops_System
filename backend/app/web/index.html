@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>BYP Ops — Orders Search</title>
+  <style>
+    :root { color-scheme: light; }
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 16px; }
+    h1 { margin: 0 0 12px 0; font-size: 20px; }
+    .bar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
+    .grid { display: grid; grid-template-columns: repeat(6, minmax(160px, 1fr)); gap: 10px; margin-bottom: 10px; }
+    .field { display: flex; flex-direction: column; gap: 4px; }
+    label { font-size: 12px; color: #444; }
+    input, select { padding: 8px; border: 1px solid #bbb; border-radius: 6px; font-size: 14px; }
+    input[type="checkbox"] { width: 16px; height: 16px; }
+    button { padding: 8px 12px; border: 1px solid #888; border-radius: 8px; background: #f4f4f4; cursor: pointer; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .muted { color: #666; font-size: 13px; }
+    .status { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; margin: 8px 0; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { padding: 8px; border-bottom: 1px solid #ddd; text-align: left; vertical-align: top; }
+    th { font-size: 12px; color: #444; user-select: none; }
+    td { font-size: 14px; }
+    .nowrap { white-space: nowrap; }
+    .small { font-size: 12px; color: #555; }
+    .err { color: #b00020; font-weight: 600; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; }
+  </style>
+</head>
+<body>
+  <h1>BYP Ops — Orders Search</h1>
+
+  <div class="grid" id="filters">
+    <div class="field">
+      <label for="artist">Artist (contains)</label>
+      <input id="artist" placeholder="Bob Dylan" />
+    </div>
+
+    <div class="field">
+      <label for="notes">Notes (contains)</label>
+      <input id="notes" placeholder="demo" />
+    </div>
+
+    <div class="field">
+      <label for="client_name">Client Name (contains)</label>
+      <input id="client_name" placeholder="John" />
+    </div>
+
+    <div class="field">
+      <label for="client_company">Client Company (contains)</label>
+      <input id="client_company" placeholder="Live Nation" />
+    </div>
+
+    <div class="field">
+      <label for="asset_type">Asset Type (exact)</label>
+      <select id="asset_type">
+        <option value="">(any)</option>
+        <option value="radio">radio</option>
+        <option value="video">video</option>
+        <option value="art">art</option>
+        <option value="other">other</option>
+      </select>
+    </div>
+
+    <div class="field">
+      <label for="status">Status (exact)</label>
+      <select id="status">
+        <option value="">(any)</option>
+        <option value="draft">draft</option>
+        <option value="finalized">finalized</option>
+      </select>
+    </div>
+
+    <div class="field">
+      <label for="rep_code">Rep Code (exact)</label>
+      <select id="rep_code">
+        <option value="">(any)</option>
+        <option value="SB">SB</option>
+        <option value="RM">RM</option>
+        <option value="AML">AML</option>
+        <option value="JS">JS</option>
+        <option value="CD">CD</option>
+      </select>
+    </div>
+
+    <div class="field">
+      <label for="sp_number">SP Number (contains)</label>
+      <input id="sp_number" class="mono" placeholder="SP000050" />
+    </div>
+
+    <div class="field">
+      <label>&nbsp;</label>
+      <div style="display:flex; gap:10px; align-items:center; height: 38px;">
+        <input id="include_deleted" type="checkbox" />
+        <span class="small">Include deleted</span>
+      </div>
+    </div>
+
+    <div class="field">
+      <label>&nbsp;</label>
+      <div style="display:flex; gap:10px; align-items:center; height: 38px;">
+        <button id="searchBtn">Search</button>
+        <button id="clearBtn" title="Clear filters">Clear</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="status">
+    <div>
+      <span id="summary" class="muted">Ready.</span>
+      <span id="error" class="err"></span>
+    </div>
+    <div style="display:flex; gap:10px; align-items:center;">
+      <button id="prevBtn">Prev</button>
+      <button id="nextBtn">Next</button>
+    </div>
+  </div>
+
+  <table>
+    <thead>
+      <tr>
+        <th class="nowrap">ID</th>
+        <th>Artist</th>
+        <th class="nowrap">Asset</th>
+        <th class="nowrap">Status</th>
+        <th class="nowrap">Rep</th>
+        <th>Client Company</th>
+        <th>Notes</th>
+      </tr>
+    </thead>
+    <tbody id="rows"></tbody>
+  </table>
+
+  <script src="/web/app.js"></script>
+</body>
+</html>
