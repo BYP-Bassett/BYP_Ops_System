@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
 
 import json
 
@@ -18,7 +19,7 @@ def _audit_details(order, details=None):
 
 
 import datetime
-from sqlalchemy import or_
+from sqlalchemy import or_, func
 from sqlalchemy.orm import Session, joinedload
 
 from app.database.session import get_db
@@ -31,46 +32,10 @@ from app.services.trello_service import rebuild_order_checklist, TrelloConfigErr
 
 router = APIRouter(prefix="/orders", tags=["Orders"])
 
-# --- Rep normalization (prevents rep_name/rep_code mismatches that break searches) ---
+class OrderSearchResponse(BaseModel):
+    total: int
+    items: list[OrderResponse]
 
-# Known reps (safe fallback). New reps can still work as long as rep_name starts with initials + " - ".
-REP_NAME_BY_CODE = {
-    "SB": "SB - Steve Bassett",
-    "RM": "RM - Ron Mewis",
-    "AML": "AML - Allison Lineberry",
-    "JS": "JS - Jon Shults",
-    "CD": "CD - Celine DeLeon",
-}
-
-def _rep_code_from_name(rep_name: str | None) -> str | None:
-    if not rep_name:
-        return None
-    s = rep_name.strip()
-    if not s:
-        return None
-    prefix = s.split("-", 1)[0].strip().upper()
-    # Treat 1–4 alpha chars as "initials" (supports future reps without updating mapping)
-    if 1 <= len(prefix) <= 4 and prefix.isalpha():
-        return prefix
-    return None
-
-def _normalize_rep_fields(rep_code: str | None, rep_name: str | None) -> tuple[str | None, str | None]:
-    code = (rep_code or "").strip().upper() or None
-    name = (rep_name or "").strip() or None
-
-    code_from_name = _rep_code_from_name(name)
-
-    # If the human-facing label includes initials, trust that and fix rep_code.
-    if code_from_name:
-        code = code_from_name
-        # Prefer canonical formatting if we know it; otherwise keep the provided name as-is.
-        name = REP_NAME_BY_CODE.get(code_from_name, name)
-
-    # If we have a code but no name, fill name from known mapping (or fall back to just the code).
-    if code and not name:
-        name = REP_NAME_BY_CODE.get(code, code)
-
-    return code, name
 
 def _now_iso() -> str:
     return datetime.datetime.now().isoformat(timespec="seconds")
@@ -191,6 +156,57 @@ def list_orders(
 
 # IMPORTANT:
 # Static routes MUST come before "/{order_id}" or Starlette may match "search"/"new" as order_id.
+def _orders_search_query(
+    db: Session,
+    *,
+    artist: str | None,
+    notes: str | None,
+    asset_type: str | None,
+    sp_number: str | None,
+    client_name: str | None,
+    client_company: str | None,
+    client_company_name: str | None,
+    status: str | None,
+    rep_code: str | None,
+    include_deleted: bool,
+):
+    q = db.query(Order)
+
+    if not include_deleted:
+        q = q.filter(Order.deleted_at.is_(None))
+
+    if artist:
+        a = artist.strip()
+        q = q.filter(Order.artist.ilike(f"%{a}%"))
+
+    if notes:
+        n = notes.strip()
+        q = q.filter(Order.notes.ilike(f"%{n}%"))
+
+    if asset_type:
+        q = q.filter(func.lower(func.trim(Order.asset_type)) == asset_type.strip().lower())
+
+    if status:
+        q = q.filter(func.lower(func.trim(Order.status)) == status.strip().lower())
+
+    if rep_code:
+        q = q.filter(func.upper(func.trim(Order.rep_code)) == rep_code.strip().upper())
+
+    if sp_number:
+        sn = sp_number.strip()
+        # join SPNumber table only when needed
+        q = q.join(SPNumber, Order.sp_id == SPNumber.id).filter(SPNumber.sp_number.ilike(f"%{sn}%"))
+
+    if client_name:
+        cn = client_name.strip()
+        q = q.filter(Order.client_name.ilike(f"%{cn}%"))
+
+    company_q = (client_company_name or client_company or "").strip()
+    if company_q:
+        q = q.filter(Order.client_company_name.ilike(f"%{company_q}%"))
+
+    return q
+
 @router.get("/search", response_model=list[OrderResponse])
 def search_orders(
     db: Session = Depends(get_db),
@@ -199,42 +215,69 @@ def search_orders(
     asset_type: str | None = Query(default=None, description="Asset type equals (radio/video/art)."),
     sp_number: str | None = Query(default=None, description="SP number contains (case-insensitive)."),
     client_name: str | None = Query(default=None, description="Client name contains (case-insensitive)."),
-    client_company: str | None = Query(default=None, description="Client company contains (case-insensitive)."),
-    client_company_name: str | None = Query(default=None, description="Client company contains (case-insensitive). (legacy param name)"),
+    client_company_name: str | None = Query(default=None, description="Client company contains (case-insensitive)."),
     status: str | None = Query(default=None, description="draft or finalized"),
     rep_code: str | None = Query(default=None, description="Rep initials equals (e.g., SB)."),
     include_deleted: bool = Query(default=False, description="Include soft-deleted orders (admin use)."),
 ):
-    q = db.query(Order).options(joinedload(Order.sp))
+    q = _orders_search_query(
+        db,
+        artist=artist,
+        notes=notes,
+        asset_type=asset_type,
+        sp_number=sp_number,
+        client_name=client_name,
+        client_company=client_company,
+        client_company_name=client_company_name,
+        status=status,
+        rep_code=rep_code,
+        include_deleted=include_deleted,
+    )
 
-    if not include_deleted:
-        q = q.filter(or_(Order.is_deleted == False, Order.is_deleted.is_(None)))
+    q = q.order_by(Order.id.desc())
+    q = q.offset(offset).limit(limit)
+    return q.all()
 
-    if artist:
-        q = q.filter(Order.artist.ilike(f"%{artist.strip()}%"))
-    if notes:
-        q = q.filter(Order.notes.ilike(f"%{notes.strip()}%"))
-    if asset_type:
-        q = q.filter(Order.asset_type == asset_type.strip().lower())
-    if client_name:
-        q = q.filter(Order.client_name.ilike(f"%{client_name.strip()}%"))
-    company_q = (client_company_name or client_company or "").strip()
-    if company_q:
-        q = q.filter(Order.client_company_name.ilike(f"%{company_q}%"))
-    if status:
-        q = q.filter(Order.status == status.strip().lower())
 
-    if rep_code:
-        q = q.filter(Order.rep_code == rep_code.strip().upper())
+@router.get("/search2", response_model=OrderSearchResponse)
+def search_orders2(
+    db: Session = Depends(get_db),
+    artist: str | None = Query(default=None, description="Artist contains (case-insensitive)."),
+    notes: str | None = Query(default=None, description="Notes contains (case-insensitive)."),
+    asset_type: str | None = Query(default=None, description="Asset type equals (radio/video/art)."),
+    sp_number: str | None = Query(default=None, description="SP number contains (case-insensitive)."),
+    client_name: str | None = Query(default=None, description="Client name contains (case-insensitive)."),
+    client_company: str | None = Query(default=None, description="Client company contains (case-insensitive)."),
+    client_company_name: str | None = Query(default=None, description="Client company contains (case-insensitive). (legacy param name)"),
+    status: str | None = Query(default=None, description="draft or finalized (exact)."),
+    rep_code: str | None = Query(default=None, description="Rep initials equals (e.g., SB)."),
+    limit: int = Query(default=200, ge=1, le=1000, description="Max rows to return (pagination)."),
+    offset: int = Query(default=0, ge=0, description="Rows to skip (pagination)."),
+    include_deleted: bool = Query(default=False, description="Include soft-deleted orders (admin use)."),
+):
+    q = _orders_search_query(
+        db,
+        artist=artist,
+        notes=notes,
+        asset_type=asset_type,
+        sp_number=sp_number,
+        client_name=client_name,
+        client_company=client_company,
+        client_company_name=client_company_name,
+        status=status,
+        rep_code=rep_code,
+        include_deleted=include_deleted,
+    )
 
-    if sp_number:
-        sn = sp_number.strip()
-        q = (
-            q.join(SPNumber, Order.sp_id == SPNumber.id, isouter=True)
-            .filter(SPNumber.sp_number.ilike(f"%{sn}%"))
-        )
+    total = q.order_by(None).count()
+    items = (
+        q.order_by(Order.id.desc())
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
+    return {"total": total, "items": items}
 
-    return q.order_by(Order.id.desc()).all()
 
 
 @router.post("/new", response_model=OrderResponse)
@@ -247,14 +290,6 @@ def create_order(
     default_notes = _default_notes_for_new_order(payload.asset_type, getattr(payload, "notes", None))
     if default_notes is not None:
         payload.notes = default_notes
-
-    # Normalize rep fields so rep_code always matches the initials in rep_name.
-    if hasattr(payload, "rep_code") or hasattr(payload, "rep_name"):
-        rc, rn = _normalize_rep_fields(getattr(payload, "rep_code", None), getattr(payload, "rep_name", None))
-        if hasattr(payload, "rep_code"):
-            payload.rep_code = rc
-        if hasattr(payload, "rep_name"):
-            payload.rep_name = rn
 
     created = create_order_service(db, payload)
 
@@ -404,11 +439,6 @@ def revise_order(
         new_order.rep_name = parent.rep_name
     if getattr(parent, "rep_code", None) is not None:
         new_order.rep_code = parent.rep_code
-
-        # Normalize rep fields (prevents mismatches that break rep_code search)
-        rc, rn = _normalize_rep_fields(getattr(new_order, "rep_code", None), getattr(new_order, "rep_name", None))
-        new_order.rep_code = rc
-        new_order.rep_name = rn
     db.commit()
     db.refresh(new_order)
 
@@ -479,11 +509,6 @@ def addl_vers_order(
         new_order.rep_name = parent.rep_name
     if getattr(parent, "rep_code", None) is not None:
         new_order.rep_code = parent.rep_code
-
-        # Normalize rep fields (prevents mismatches that break rep_code search)
-        rc, rn = _normalize_rep_fields(getattr(new_order, "rep_code", None), getattr(new_order, "rep_name", None))
-        new_order.rep_code = rc
-        new_order.rep_name = rn
     db.commit()
     db.refresh(new_order)
 
@@ -550,11 +575,6 @@ def duplicate_order(
         new_order.rep_name = parent.rep_name
     if getattr(parent, "rep_code", None) is not None:
         new_order.rep_code = parent.rep_code
-
-        # Normalize rep fields (prevents mismatches that break rep_code search)
-        rc, rn = _normalize_rep_fields(getattr(new_order, "rep_code", None), getattr(new_order, "rep_name", None))
-        new_order.rep_code = rc
-        new_order.rep_name = rn
     db.commit()
     db.refresh(new_order)
 
@@ -709,12 +729,6 @@ def update_order(
         if val is not None:
             setattr(order, field, val)
             touched_fields.append(field)
-
-    # Keep rep_name / rep_code in sync to prevent incorrect rep searches.
-    if ("rep_name" in touched_fields) or ("rep_code" in touched_fields):
-        rc, rn = _normalize_rep_fields(getattr(order, "rep_code", None), getattr(order, "rep_name", None))
-        order.rep_code = rc
-        order.rep_name = rn
 
     # If your OrderUpdate schema ever includes status, still block it here.
     if hasattr(payload, "status") and getattr(payload, "status") is not None:

@@ -999,7 +999,7 @@ class OrderSearchGUI(tk.Tk):
             self.tree.delete(iid)
         self._configure_tree_columns()
         # Re-render the current results so the list doesn't go blank
-        self._apply_results(getattr(self, "_last_items", []), silent=True)
+        self._apply_results(getattr(self, "_last_items", []), total=getattr(self, "_last_total", None), silent=True)
 
     def show_my_drafts(self):
         # Convenience: show draft orders for the rep in the Rep box (initials).
@@ -1034,6 +1034,10 @@ class OrderSearchGUI(tk.Tk):
         if status:
             params["status"] = status
 
+        rep = (getattr(self, "rep_search_var", tk.StringVar()).get() or "").strip().upper()
+        if rep:
+            params["rep_code"] = rep
+
         if self.adv_var.get():
             cn = (self.client_name_var.get() or "").strip()
             cc = (self.client_company_var.get() or "").strip()
@@ -1041,10 +1045,7 @@ class OrderSearchGUI(tk.Tk):
                 params["client_name"] = cn
             if cc:
                 params["client_company"] = cc
-
-        rep_code = (getattr(self, "rep_search_var", tk.StringVar()).get() or "").strip().upper()
-        if rep_code:
-            params["rep_code"] = rep_code
+                params["client_company_name"] = cc
 
         return params
 
@@ -1072,7 +1073,7 @@ class OrderSearchGUI(tk.Tk):
 
     def run_search(self, silent: bool = False):
         params = self._build_search_params()
-        url = f"{API_BASE}/orders/search"
+        url = f"{API_BASE}/orders/search2"
         if params:
             url = f"{url}?{urlencode(params)}"
 
@@ -1082,12 +1083,27 @@ class OrderSearchGUI(tk.Tk):
         def worker():
             try:
                 data = http_get_json(url, timeout=25)
-                items = data.get("value") if isinstance(data, dict) else None
+                total = None
+                items = None
+
+                # /orders/search2 -> { total: int, items: [...] }
+                if isinstance(data, dict) and isinstance(data.get("items"), list):
+                    items = data.get("items")
+                    try:
+                        total = int(data.get("total"))
+                    except Exception:
+                        total = None
+
+                # legacy shapes we still tolerate
+                if items is None and isinstance(data, dict):
+                    items = data.get("value")
                 if items is None and isinstance(data, list):
                     items = data
                 if items is None:
                     items = []
-                self.after(0, lambda: self._apply_results(items, silent=silent))
+                if total is None:
+                    total = len(items)
+                self.after(0, lambda: self._apply_results(items, total=total, silent=silent))
             except HTTPError as e:
                 self.after(0, lambda: self._search_fail(_http_error_to_message(e), silent=silent))
             except URLError as e:
@@ -1102,8 +1118,9 @@ class OrderSearchGUI(tk.Tk):
             self.msg_var.set("Failed.")
             messagebox.showerror("Search failed", msg)
 
-    def _apply_results(self, items: list, silent: bool):
+    def _apply_results(self, items: list, total: int | None = None, silent: bool = False):
         self._last_items = items or []
+        self._last_total = total if total is not None else len(self._last_items)
         for iid in self.tree.get_children():
             self.tree.delete(iid)
 
@@ -1141,7 +1158,10 @@ class OrderSearchGUI(tk.Tk):
             self.tree.insert("", "end", iid=str(oid), values=values)
 
         if not silent:
-            self.msg_var.set(f"{len(items)} result(s)")
+            if total is not None and total != len(items):
+                self.msg_var.set(f"{len(items)} of {total} result(s)")
+            else:
+                self.msg_var.set(f"{len(items)} result(s)")
 
     def open_selected_from_api(self):
         sel = self.tree.selection()

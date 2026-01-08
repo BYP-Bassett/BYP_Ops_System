@@ -1,6 +1,6 @@
 # app/models/orders.py
 
-from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, text
+from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, text, event
 from sqlalchemy.orm import relationship
 
 from app.models.base import Base
@@ -56,3 +56,56 @@ class Order(Base):
 
     # Relationship to SP
     sp = relationship(SPNumber, backref="orders")
+
+# --- Rep sync guardrails (model-level) ---
+# Prevents storing mismatched rep_name/rep_code even if a route forgets to normalize.
+
+REP_NAME_BY_CODE = {
+    "SB": "SB - Steve Bassett",
+    "RM": "RM - Ron Mewis",
+    "AML": "AML - Allison Lineberry",
+    "JS": "JS - Jon Shults",
+    "CD": "CD - Celine DeLeon",
+}
+
+def _rep_code_from_name(rep_name: str | None) -> str | None:
+    if not rep_name:
+        return None
+    s = rep_name.strip()
+    if not s:
+        return None
+    prefix = s.split("-", 1)[0].strip().upper()
+    if 1 <= len(prefix) <= 4 and prefix.isalpha():
+        return prefix
+    return None
+
+def _normalize_rep(target: "Order") -> None:
+    # Note: On insert, DB server_default may populate values; if both are missing here, we leave it alone.
+    code = (getattr(target, "rep_code", None) or "").strip().upper() or None
+    name = (getattr(target, "rep_name", None) or "").strip() or None
+
+    code_from_name = _rep_code_from_name(name)
+
+    # If rep_name includes initials, that wins. Fix rep_code to match.
+    if code_from_name:
+        code = code_from_name
+        # If we know the canonical display string, use it; else keep provided name as-is.
+        name = REP_NAME_BY_CODE.get(code_from_name, name)
+
+    # If we have a code but no name, fill name from mapping (or just the code).
+    if code and not name:
+        name = REP_NAME_BY_CODE.get(code, code)
+
+    # Write back only if we have something (avoid stomping DB defaults with None)
+    if code is not None:
+        target.rep_code = code
+    if name is not None:
+        target.rep_name = name
+
+@event.listens_for(Order, "before_insert")
+def _order_before_insert(mapper, connection, target):
+    _normalize_rep(target)
+
+@event.listens_for(Order, "before_update")
+def _order_before_update(mapper, connection, target):
+    _normalize_rep(target)
