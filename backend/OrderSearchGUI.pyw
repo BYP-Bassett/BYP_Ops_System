@@ -1040,7 +1040,11 @@ class OrderSearchGUI(tk.Tk):
             if cn:
                 params["client_name"] = cn
             if cc:
-                params["client_company_name"] = cc
+                params["client_company"] = cc
+
+        rep_code = (getattr(self, "rep_search_var", tk.StringVar()).get() or "").strip().upper()
+        if rep_code:
+            params["rep_code"] = rep_code
 
         return params
 
@@ -1068,7 +1072,6 @@ class OrderSearchGUI(tk.Tk):
 
     def run_search(self, silent: bool = False):
         params = self._build_search_params()
-        rep_filter = (getattr(self, "rep_search_var", tk.StringVar()).get() or "").strip().upper()
         url = f"{API_BASE}/orders/search"
         if params:
             url = f"{url}?{urlencode(params)}"
@@ -1084,8 +1087,6 @@ class OrderSearchGUI(tk.Tk):
                     items = data
                 if items is None:
                     items = []
-                if rep_filter:
-                    items = [r for r in items if rep_initials((r or {}).get("rep_name", "") or "").upper() == rep_filter]
                 self.after(0, lambda: self._apply_results(items, silent=silent))
             except HTTPError as e:
                 self.after(0, lambda: self._search_fail(_http_error_to_message(e), silent=silent))
