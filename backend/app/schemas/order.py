@@ -152,6 +152,10 @@ class OrderResponse(BaseModel):
     status: Optional[str] = None
     finalized_at: Optional[str] = None
 
+
+    # timestamps
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
     # Trello tracking
     trello_card_id: Optional[str] = None
     trello_checklist_id: Optional[str] = None

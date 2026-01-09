@@ -1,5 +1,7 @@
 # app/models/orders.py
 
+from datetime import datetime, timezone
+
 from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, text, event
 from sqlalchemy.orm import relationship
 
@@ -54,8 +56,16 @@ class Order(Base):
 
     created_at = Column(String)
 
+    updated_at = Column(String, nullable=True)
     # Relationship to SP
     sp = relationship(SPNumber, backref="orders")
+
+
+
+def _utc_now_iso() -> str:
+    # Example: 2026-01-09T21:33:12+00:00
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
 
 # --- Rep sync guardrails (model-level) ---
 # Prevents storing mismatched rep_name/rep_code even if a route forgets to normalize.
@@ -104,8 +114,15 @@ def _normalize_rep(target: "Order") -> None:
 
 @event.listens_for(Order, "before_insert")
 def _order_before_insert(mapper, connection, target):
+    # Ensure timestamps are always populated for new rows.
+    if not getattr(target, 'created_at', None):
+        target.created_at = _utc_now_iso()
+    if not getattr(target, 'updated_at', None):
+        target.updated_at = target.created_at
     _normalize_rep(target)
 
 @event.listens_for(Order, "before_update")
 def _order_before_update(mapper, connection, target):
+    # Touch updated_at on any update.
+    target.updated_at = _utc_now_iso()
     _normalize_rep(target)
