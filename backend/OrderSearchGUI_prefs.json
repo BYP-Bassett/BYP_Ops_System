@@ -1,13 +1,13 @@
 {
   "column_widths": {
-    "Status": 57,
     "Rep": 49,
-    "Artist": 262,
+    "Status": 58,
     "Asset": 55,
-    "Notes": 396,
     "SP": 79,
-    "Revision Of": 77,
-    "Add'l Vers Of": 96
+    "Revision Of": 76,
+    "Add'l Vers Of": 96,
+    "Artist": 262,
+    "Notes": 396
   },
   "window_geometry": "1093x720+-1738+182",
   "window_state": "normal"

@@ -982,7 +982,7 @@ class OrderSearchGUI(tk.Tk):
         self._toggle_adv()
 
     def _tree_columns(self):
-        base = ["Status", "Rep", "Artist", "Asset", "Notes", "SP", "Revision Of", "Add'l Vers Of"]
+        base = ["Rep", "Status", "Asset", "SP", "Revision Of", "Add'l Vers Of", "Artist", "Notes"]
         if self.show_order_id:
             base.append("Order ID")
         return base
@@ -1183,7 +1183,7 @@ class OrderSearchGUI(tk.Tk):
 
             rep = rep_initials(row.get("rep_name", "") or "")
 
-            values = [status, rep, artist, asset, notes, sp_num, rev, addl]
+            values = [rep, status, asset, sp_num, rev, addl, artist, notes]
             if self.show_order_id:
                 values.append(str(oid) if oid is not None else "")
 
@@ -1254,7 +1254,12 @@ class OrderSearchGUI(tk.Tk):
             order_ids.append(oid)
             try:
                 values = self.tree.item(iid, "values") or []
-                status = (values[0] or "").strip().lower() if values else ""
+                status_idx = 0
+                try:
+                    status_idx = self._tree_columns().index("Status")
+                except Exception:
+                    status_idx = 0
+                status = (values[status_idx] or "").strip().lower() if (values and len(values) > status_idx) else ""
                 if status == "finalized":
                     finalized_ids.append(oid)
             except Exception:

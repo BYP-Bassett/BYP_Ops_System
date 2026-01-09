@@ -1,73 +1,111 @@
-# SP Order System — THREAD HANDOFF
-_As of 2026-01-08 (America/Chicago)_
+# THREAD_HANDOFF.md — SP Order System (Thread #16)
 
-## 1) Current Truth (what is working right now)
-**Repo / environment**
-- Backend root: `C:\BYP_Ops_System\backend`
-- Venv python: `C:\BYP_Ops_System\backend\venv\Scripts\python.exe`
-- DB: `backend\byp_ops.db` (SQLite)
-- Engine URL: `sqlite:///./byp_ops.db` (ABS resolves to `C:\BYP_Ops_System\backend\byp_ops.db`)
-- Alembic: head up to date
+Last updated: 2026-01-09 (America/Chicago)
 
-**Start commands**
-From `C:\BYP_Ops_System\backend`:
-- Start API: `python -m uvicorn app.main:app --reload`
-- Start Tkinter GUI: `.\venv\Scripts\python.exe .\OrderSearchGUI.pyw`
-- Web UI: `http://127.0.0.1:8000/`
+## 1) Current Truth
 
-**Working endpoints**
-- `/orders/search` — list-only search (server-side filtering)
-- `/orders/search2` — `{ total, items }` search (pagination metadata)
-- `/orders/{id}` — JSON detail
-- `/health` — JSON (because `/` is now HTML)
+**Repo / backend root (Windows):** `C:\BYP_Ops_System\backend`  
+**Branch:** `fix-delete-override`  
+**Python venv:** `C:\BYP_Ops_System\backend\venv\Scripts\python.exe`  
+**DB (SQLite):** `C:\BYP_Ops_System\backend\byp_ops.db`  
+**SQLAlchemy engine URL:** `sqlite:///./byp_ops.db` (resolves to the absolute path above)
 
-**Rep fields**
-- `rep_code` + `rep_name` exist end-to-end (DB/model/schemas/routes)
-- Clone ops carry both forward
-- Exact rep filtering uses `rep_code`
+### Start API
+```powershell
+cd C:\BYP_Ops_System\backend
+.\venv\Scripts\python.exe -m uvicorn app.main:app --reload
+```
 
-## 2) Branch + latest savepoint tags
-- Branch: `fix-delete-override`
-- Savepoints (newest first):
-  - `savepoint-webui-v1-search-2026-01-08` — web search UI served at `/` + paging via `/orders/search2`
-  - `savepoint-search2-total-pagination-2026-01-08` — `/search2` returns `{total, items}`; GUI uses `/search2`
-  - `savepoint-search-and-rep-guard-2026-01-08` — server-side filters + rep_code/rep_name sync guard
-  - (older) `savepoint-gui-window-geometry-2026-01-07`, `savepoint-gui-enter-and-blankrev-2026-01-07`, etc.
+### Web UI
+- Home/Search: `http://127.0.0.1:8000/`
+- Detail (read-only HTML rendering JSON): `http://127.0.0.1:8000/order/{id}`
+  - Includes a **Parent copy widget** that shows the full FM-style string:
+    - `Revision of SPxxxxxx` **or**
+    - `Add'l vers of SPxxxxxx`
+  - Clicking the parent field **selects all + auto-copies**, and there is also a **Copy** button.
+  - Important: `app/main.py` uses a Python `f"""..."""` HTML block — **do not** use JS template literals with `${}` inside it.
 
-## 3) Canonical Rules (don’t violate these)
-- **One step at a time.** One action, then wait for confirmation/error.
-- **No manual file editing.** If a file change is needed:
-  - user uploads the current file
-  - assistant returns a downloadable replacement with the **same exact filename**
-- **No renaming files, ever.**
+### API endpoints (confirmed in use)
+- `GET /orders/{id}` returns JSON (includes `created_at`, `updated_at`, and `parent_display`)
+- Search:
+  - `GET /orders/search` → list only
+  - `GET /orders/search2` → `{ total, items }` with pagination
+
+### Desktop GUI
+- Desktop app file: `C:\BYP_Ops_System\backend\OrderSearchGUI.pyw`
+- The field label is now **“Revision/Add'l of”**
+- That field shows a single “parent” display string (revision OR add'l version) and is copy-friendly.
+
+### GitHub remote (exists now)
+- Remote: `origin = https://github.com/BYP-Bassett/BYP_Ops_System.git`
+- Work is still “dev local, deploy later” — nobody else uses it yet.
+
+---
+
+## 2) Branch + latest savepoints
+
+**Branch:** `fix-delete-override`
+
+**Key savepoint tags (older → newer):**
+- `savepoint-search-and-rep-guard-2026-01-08`
+- `savepoint-search2-total-pagination-2026-01-08`
+- `savepoint-webui-v1-search-2026-01-08`
+- `savepoint-webui-search-state-2026-01-09`
+- `savepoint-order-timestamps-2026-01-09`
+- **`savepoint-webui-parent-copy-2026-01-09`** (latest)
+
+**Latest commit:** `658f478` (tagged by `savepoint-webui-parent-copy-2026-01-09`, pushed)
+
+---
+
+## 3) Canonical Rules (do-not-violate)
+
+- **One step at a time**: user runs commands; we wait for success/error before proceeding.
+- **No manual file edits**: user uploads/pastes → we return a **downloadable replacement**.
+- **No renaming files, ever.** Replacements must keep the same exact filename.
 - **Windows paths only.**
 - **GUI layout tweaks are pinned** unless explicitly unpinned.
+- If Python f-strings contain HTML/JS: avoid `${}` template literals; use string concatenation instead.
 
-## 4) Next Single Target (one task, not a wishlist)
-**Target:** Web UI “order detail” page (read-only HTML view)
+---
 
-**Goal:** Clicking a row in the web table opens a human page (not JSON) showing full order details.
+## 4) Next Single Target (ONE task)
 
-**Done when**
-- Web table rows are clickable
-- Clicking a row navigates to `/order/<id>` (HTML page)
-- Page shows core fields + SP block (read-only)
-- Still keeps `/orders/<id>` as JSON API
+### Target
+**Web UI must eventually support full workflow** (remote users will use browser).  
+Desktop is “office convenience,” not the primary app.
+
+**Best next step:** add **inline edit + Save** on `/order/{id}` using existing `PATCH /orders/{id}`.
+
+### Done when
+On `http://127.0.0.1:8000/order/{id}`:
+- User can edit at least:
+  - `notes`
+  - `client_name`
+  - `client_company_name`
+- Click **Save** → calls API PATCH → refreshes the displayed values from server response.
+- No changes to immutable fields (ex: `asset_type`) unless API explicitly supports it.
+
+---
 
 ## Smoke Tests + Landmines
-**Smoke tests**
-- API reachable:
-  - `irm "http://127.0.0.1:8000/orders/search2?limit=5&offset=0"`
-- Pagination sanity:
-  - `irm "http://127.0.0.1:8000/orders/search2?rep_code=SB&limit=5&offset=0"`
-  - `irm "http://127.0.0.1:8000/orders/search2?rep_code=SB&limit=5&offset=5"`
-- Web UI loads:
-  - open `http://127.0.0.1:8000/` and click **Search**
-- DB sanity:
-  - `.\venv\Scripts\python.exe -c "import sqlite3; c=sqlite3.connect('byp_ops.db'); print(c.execute('select count(1) from orders').fetchone()[0]); c.close()"`
 
-**Landmines**
-- Empty web table + no server log for `/orders/search2` usually means **JS didn’t load / JS syntax error** → check F12 console + hard refresh `Ctrl+F5`.
-- `/favicon.ico` 404 is harmless.
-- If Uvicorn throws `SyntaxError` pointing at `f\"` / `description=\"`: escaped quotes leaked into Python code again.
-- If port seems “stuck”: kill old Uvicorn (Ctrl+C) or `taskkill /F /IM python.exe`.
+### Smoke tests
+**API reachable**
+```powershell
+irm "http://127.0.0.1:8000/orders/search2?limit=5&offset=0"
+```
+
+**Detail page loads**
+- `http://127.0.0.1:8000/order/85`
+
+**Timestamps present**
+```powershell
+irm "http://127.0.0.1:8000/orders/72" | select created_at, updated_at
+```
+
+### Landmines
+- If web UI looks empty: check browser console for JS errors; hard refresh `Ctrl+F5`
+- `/favicon.ico 404` is harmless
+- If server throws `SyntaxError` / `NameError` around f-strings: you accidentally put JS `${}` or bad escaping inside Python again; fix immediately.
+- If an order “exists” in POST response but GET 404s: wrong uvicorn process / wrong working dir / wrong DB.

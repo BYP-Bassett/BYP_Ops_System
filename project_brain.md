@@ -1,70 +1,131 @@
-# PROJECT_BRAIN — SP Order System
-_As of 2026-01-08 (America/Chicago)_
+# project_brain.md — SP Order System
 
-## What this is
-Windows-first **FastAPI + SQLite + Alembic** backend with:
-- **Tkinter GUI** (`OrderSearchGUI.pyw`) for internal reps to create/edit/search orders
-- **Web UI v1 (vanilla HTML/JS)** for browser-based search (no React, no drama)
+Last updated: 2026-01-09 (America/Chicago)
 
-## Paths / environment
-- Backend root: `C:\BYP_Ops_System\backend`
-- Venv python: `C:\BYP_Ops_System\backend\venv\Scripts\python.exe`
-- DB: `backend\byp_ops.db` (SQLite)
-- SQLAlchemy engine URL: `sqlite:///./byp_ops.db`
-- ABS DB path resolves to: `C:\BYP_Ops_System\backend\byp_ops.db`
-- Alembic: head is up to date
+## What this project is
+A BYP Ops Order system built on **FastAPI + SQLAlchemy + Alembic + SQLite** with:
+- API-first backend (eventually cloud-hosted)
+- Two UIs:
+  - **Web UI** for remote users (must become fully functional)
+  - **Desktop Tkinter GUI** for in-office convenience
 
-## Start commands
-From `C:\BYP_Ops_System\backend`:
-- Start API: `python -m uvicorn app.main:app --reload`
-- Start Tkinter GUI: `.\venv\Scripts\python.exe .\OrderSearchGUI.pyw`
-- Web UI: open `http://127.0.0.1:8000/`
+Goal: replace/augment FileMaker workflows while preserving key behavior (SP numbers, revision/add'l version relationships, etc.).
 
-## Key API endpoints
-- `GET /orders/search` — returns list only (server-side filtering + pagination)
-- `GET /orders/search2` — returns `{ total, items }` (same filters + pagination)
-- `GET /orders/{id}` — returns JSON for a single order
-- `GET /health` — JSON health endpoint (because `/` is now the web UI)
+---
 
-### Search filters (current)
-Contains (case-insensitive):
-- `artist`, `notes`, `client_name`, `client_company` (and legacy alias `client_company_name`), `sp_number` (contains on SP)
-Exact (normalized via trim/case):
-- `asset_type`, `status`, `rep_code`
+## Repo + Environment
 
-Pagination:
-- `limit` default 200 (server)
-- `offset` default 0
-- newest-first (id desc)
-- `include_deleted=false` by default (active only)
+**Backend root:** `C:\BYP_Ops_System\backend`  
+**Branch:** `fix-delete-override`  
+**venv python:** `.\venv\Scripts\python.exe`  
+**DB:** `C:\BYP_Ops_System\backend\byp_ops.db`  
+**Engine URL:** `sqlite:///./byp_ops.db`
 
-## Web UI v1 (vanilla)
-Files:
-- `backend\app\web\index.html`
-- `backend\app\web\app.js`
+### Start server
+```powershell
+cd C:\BYP_Ops_System\backend
+.\venv\Scripts\python.exe -m uvicorn app.main:app --reload
+```
 
-Behavior:
-- Click **Search** to load results (no auto-search on page load)
-- Uses `/orders/search2` and shows “Showing X–Y of TOTAL”
-- Page size is currently **50** in `app.js` (you’ll decide final default later once real web UI sizing is known)
+---
 
-## Rep fields (confirmed, end-to-end)
-- `rep_name` (display): e.g. `SB - Steve Bassett`
-- `rep_code` (initials): e.g. `SB`
-- Clone ops (revise/add’l vers) carry both forward
-- Exact rep filtering is done by `rep_code` (not parsing `rep_name`)
+## Web UI (current state)
 
-## Git state / safe tags
-Branch: `fix-delete-override`
+### Home/Search
+- `http://127.0.0.1:8000/`
+- Uses `/orders/search2` for paginated results.
+- Search state persists (auto-load + returns to results instead of blank after navigating back).
 
-Known-good tags (newest first):
-- `savepoint-webui-v1-search-2026-01-08` — web UI v1 + paging/search2
-- `savepoint-search2-total-pagination-2026-01-08` — `/search2` returns `{total, items}`; GUI uses `/search2`
-- `savepoint-search-and-rep-guard-2026-01-08` — server-side filters; rep_code/rep_name sync guard
+### Detail page
+- `http://127.0.0.1:8000/order/{id}`
+- Renders JSON from `GET /orders/{id}`.
+- Includes **Parent copy widget** showing the full string:
+  - `Revision of SPxxxxxx` OR `Add'l vers of SPxxxxxx`
+- Click-to-select-all + auto-copy, plus Copy button.
+- Implementation is embedded HTML/JS inside `app/main.py` using a Python `f"""..."""`.
 
-## Known sharp edges / landmines
-- **Blank GUI** often means API is throwing 500s (schema/model mismatch), not Tkinter “breaking”.
-- **Port stuck**: old Uvicorn still running → Ctrl+C that window.
-- **PowerShell quoting**: avoid nested escaping; prefer simple commands or parameters.
-- If you see `SyntaxError` with `f\"` or `description=\"` in Python: you’ve got escaped quotes in Python code again. Fix immediately.
-- `/favicon.ico 404` in server logs is harmless browser noise.
+**Landmine:** no JS template literals with `${}` inside that `f"""` block. Use string concatenation.
+
+---
+
+## Desktop GUI (current state)
+
+**File:** `C:\BYP_Ops_System\backend\OrderSearchGUI.pyw`
+
+- The field label is **Revision/Add'l of**
+- It displays one FM-style parent display string (revision OR add'l).
+- It is copy-friendly.
+
+---
+
+## API + Data model notes
+
+### Orders
+- `GET /orders/{id}` returns JSON including:
+  - `created_at` and `updated_at`
+  - `parent_display`
+- Search endpoints:
+  - `/orders/search` list-only
+  - `/orders/search2` returns `{ total, items }`
+
+### Revision/Add'l Version behavior (FM parity)
+- In FileMaker, the “parent display” is a **non-editable** field; users copy/paste it into notes if needed.
+- We match that:
+  - store/compute a single parent display string
+  - do **not** spam Notes with repeated lineage strings
+
+---
+
+## Git / Savepoints / Remote
+
+Remote:
+- `origin = https://github.com/BYP-Bassett/BYP_Ops_System.git`
+
+Latest known good tag:
+- **savepoint-webui-parent-copy-2026-01-09** (commit `658f478`, pushed)
+
+Other recent tags:
+- savepoint-webui-search-state-2026-01-09
+- savepoint-order-timestamps-2026-01-09
+
+---
+
+## Canonical Rules (non-negotiable)
+
+- One step at a time; wait for confirmation/error.
+- No manual file edits — replacements only, same filenames.
+- No renaming files.
+- Windows paths only.
+- GUI layout changes are pinned unless explicitly unpinned.
+
+---
+
+## Next Single Target
+
+**Web UI must become the full app** for remote work.
+
+**Next step:** implement **inline edit + Save** on `/order/{id}`:
+- Editable first: `notes`, `client_name`, `client_company_name`
+- Save uses `PATCH /orders/{id}`
+- After save: show updated values (and updated timestamp)
+
+---
+
+## Smoke tests + common failures
+
+**API reachable**
+```powershell
+irm "http://127.0.0.1:8000/orders/search2?limit=5&offset=0"
+```
+
+**Detail loads**
+- `http://127.0.0.1:8000/order/85`
+
+**Timestamps**
+```powershell
+irm "http://127.0.0.1:8000/orders/72" | select created_at, updated_at
+```
+
+If web UI empty: console errors; hard refresh Ctrl+F5  
+/favicon.ico 404: harmless  
+f-string crash: `${}` or escaping inside Python HTML — fix immediately.

@@ -31,7 +31,8 @@ def web_root():
 
 @app.get("/order/{order_id}", include_in_schema=False)
 def web_order_detail(order_id: int):
-    # Read-only HTML page that fetches /orders/{id} JSON and renders it (human-friendly).
+    # HTML page that fetches /orders/{id} JSON and renders it (human-friendly).
+    # Now supports inline edit + Save for a small set of fields.
     html = f"""<!doctype html>
 <html lang="en">
 <head>
@@ -57,7 +58,12 @@ def web_order_detail(order_id: int):
       background: #f4f4f4; cursor: pointer;
     }}
     button:active {{ transform: translateY(1px); }}
+    button:disabled {{
+      opacity: 0.5;
+      cursor: not-allowed;
+    }}
     .muted {{ color: #666; font-size: 13px; }}
+    .ok {{ color: #0a7b27; font-weight: 700; }}
     .err {{ color: #b00020; font-weight: 700; white-space: pre-wrap; }}
     .grid {{
       display: grid;
@@ -103,6 +109,27 @@ def web_order_detail(order_id: int):
       font-size: 14px;
       background: #fff;
     }}
+
+    /* Inline edit controls */
+    .editbox {{
+      width: min(520px, 100%);
+      padding: 8px 10px;
+      border: 1px solid #ccc;
+      border-radius: 10px;
+      font-size: 14px;
+      background: #fff;
+      font-family: inherit;
+    }}
+    textarea.editbox {{
+      min-height: 90px;
+      resize: vertical;
+      font-family: inherit;
+    }}
+    .hint {{
+      font-size: 12px;
+      color: #666;
+      margin-top: 6px;
+    }}
   </style>
 </head>
 <body>
@@ -118,7 +145,11 @@ def web_order_detail(order_id: int):
       <button id="copyParentBtn" type="button">Copy</button>
     </span>
 
+    <button id="saveBtn" type="button" disabled>Save</button>
+    <button id="resetBtn" type="button" disabled>Reset</button>
+
     <span id="status" class="muted">Loading…</span>
+    <span id="ok" class="ok"></span>
     <span id="error" class="err"></span>
   </div>
 
@@ -126,6 +157,7 @@ def web_order_detail(order_id: int):
     <div class="card">
       <h2>Order</h2>
       <table><tbody id="orderRows"></tbody></table>
+      <div class="hint">Editable here: <b>Notes</b></div>
     </div>
 
     <div class="card">
@@ -136,6 +168,7 @@ def web_order_detail(order_id: int):
     <div class="card">
       <h2>Client</h2>
       <table><tbody id="clientRows"></tbody></table>
+      <div class="hint">Editable here: <b>Client Name</b>, <b>Client Company</b></div>
     </div>
 
     <div class="card">
@@ -156,7 +189,11 @@ def web_order_detail(order_id: int):
       const ORDER_ID = {order_id};
 
       const statusEl = document.getElementById("status");
+      const okEl = document.getElementById("ok");
       const errEl = document.getElementById("error");
+
+      const saveBtn = document.getElementById("saveBtn");
+      const resetBtn = document.getElementById("resetBtn");
 
       const orderRows = document.getElementById("orderRows");
       const spRows = document.getElementById("spRows");
@@ -167,13 +204,23 @@ def web_order_detail(order_id: int):
       const parentInput = document.getElementById("parentDisplay");
       const copyBtn = document.getElementById("copyParentBtn");
 
+      // Editable inputs
+      let notesInput = null;
+      let clientNameInput = null;
+      let clientCompanyInput = null;
+
+      // Track last-loaded values so we can enable Save only when dirty
+      let baseline = {{
+        notes: "",
+        client_name: "",
+        client_company_name: ""
+      }};
+
+      let isSaving = false;
+
       document.getElementById("backBtn").addEventListener("click", () => {{
-        // Go back to whatever search/page you came from. If there is no history, fallback to home.
-        if (window.history.length > 1) {{
-          window.history.back();
-        }} else {{
-          window.location.href = "/";
-        }}
+        // Always go to main search (and force refresh so new/edited orders show immediately).
+        window.location.href = "/?refresh=1";
       }});
 
       function esc(s) {{
@@ -213,6 +260,31 @@ def web_order_detail(order_id: int):
         tr.appendChild(th);
         tr.appendChild(td);
         tbody.appendChild(tr);
+      }}
+
+      function addInputRow(tbody, label, id, kind) {{
+        const tr = document.createElement("tr");
+
+        const th = document.createElement("th");
+        th.textContent = label;
+
+        const td = document.createElement("td");
+        let input;
+        if (kind === "textarea") {{
+          input = document.createElement("textarea");
+        }} else {{
+          input = document.createElement("input");
+          input.type = "text";
+        }}
+        input.id = id;
+        input.className = "editbox";
+        td.appendChild(input);
+
+        tr.appendChild(th);
+        tr.appendChild(td);
+        tbody.appendChild(tr);
+
+        return input;
       }}
 
       function renderSection(tbody, data, fields) {{
@@ -291,17 +363,107 @@ def web_order_detail(order_id: int):
         }});
       }}
 
-      async function load() {{
-        try {{
-          errEl.textContent = "";
-          statusEl.textContent = "Fetching…";
+      function normalize(s) {{
+        return String(s ?? "");
+      }}
 
-          const res = await fetch(`/orders/${{ORDER_ID}}`);
+      function getDraft() {{
+        return {{
+          notes: normalize(notesInput?.value),
+          client_name: normalize(clientNameInput?.value),
+          client_company_name: normalize(clientCompanyInput?.value)
+        }};
+      }}
+
+      function setDraftFromBaseline() {{
+        if (notesInput) notesInput.value = baseline.notes;
+        if (clientNameInput) clientNameInput.value = baseline.client_name;
+        if (clientCompanyInput) clientCompanyInput.value = baseline.client_company_name;
+      }}
+
+      function isDirty() {{
+        const d = getDraft();
+        return (
+          d.notes !== baseline.notes ||
+          d.client_name !== baseline.client_name ||
+          d.client_company_name !== baseline.client_company_name
+        );
+      }}
+
+      function refreshDirtyUI() {{
+        const dirty = isDirty();
+        // Save should always be allowed (even if nothing changed) so users can "save as is".
+        saveBtn.disabled = !!isSaving;
+        resetBtn.disabled = !!isSaving ? true : !dirty;
+      }}
+
+      async function save() {{
+        try {{
+          okEl.textContent = "";
+          errEl.textContent = "";
+          statusEl.textContent = "Saving…";
+          isSaving = true;
+          refreshDirtyUI();
+
+          const d = getDraft();
+          const payload = {{
+            notes: d.notes,
+            client_name: d.client_name,
+            client_company_name: d.client_company_name
+          }};
+
+          const res = await fetch("/orders/" + ORDER_ID, {{
+            method: "PATCH",
+            headers: {{
+              "Content-Type": "application/json"
+            }},
+            body: JSON.stringify(payload)
+          }});
+
           const text = await res.text();
 
           if (!res.ok) {{
             statusEl.textContent = "";
-            errEl.textContent = `HTTP ${{res.status}}\\n${{text}}`;
+            errEl.textContent = "HTTP " + res.status + "\\n" + text;
+            isSaving = false;
+            refreshDirtyUI();
+            return;
+          }}
+
+          okEl.textContent = "Saved.";
+          // Reload to show updated_at + any server-side normalization
+          await load();
+          isSaving = false;
+          refreshDirtyUI();
+        }} catch (e) {{
+          statusEl.textContent = "";
+          errEl.textContent = String(e);
+          isSaving = false;
+          refreshDirtyUI();
+        }}
+      }}
+
+      saveBtn.addEventListener("click", save);
+
+      resetBtn.addEventListener("click", () => {{
+        okEl.textContent = "";
+        errEl.textContent = "";
+        setDraftFromBaseline();
+        refreshDirtyUI();
+      }});
+
+      async function load() {{
+        try {{
+          okEl.textContent = "";
+          errEl.textContent = "";
+          statusEl.textContent = "Fetching…";
+
+          const res = await fetch("/orders/" + ORDER_ID);
+          const text = await res.text();
+
+          if (!res.ok) {{
+            statusEl.textContent = "";
+            errEl.textContent = "HTTP " + res.status + "\\n" + text;
             return;
           }}
 
@@ -314,19 +476,21 @@ def web_order_detail(order_id: int):
           parentInput.placeholder = parentDisplay ? "" : "(none)";
           copyBtn.disabled = !parentDisplay;
 
-          // Order fields
-          renderSection(orderRows, data, [
-            {{ label: "ID", key: "id" }},
-            {{ label: "Artist", key: "artist" }},
-            {{ label: "Asset Type", key: "asset_type" }},
-            {{ label: "Status", key: "status" }},
-            {{ label: "Notes", key: "notes" }},
-            {{ label: "Deleted?", key: "is_deleted" }},
-            {{ label: "Created", key: "created_at" }},
-            {{ label: "Updated", key: "updated_at" }},
-          ]);
+          // ----- Order section (Notes editable) -----
+          orderRows.innerHTML = "";
+          addRow(orderRows, "ID", data.id);
+          addRow(orderRows, "Artist", data.artist);
+          addRow(orderRows, "Asset Type", data.asset_type);
+          addRow(orderRows, "Status", data.status);
 
-          // SP fields (supports either nested sp.* or flat sp_* fields)
+          notesInput = addInputRow(orderRows, "Notes", "editNotes", "textarea");
+
+          addRow(orderRows, "Deleted?", data.is_deleted);
+          addRow(orderRows, "Created", data.created_at);
+          addRow(orderRows, "Updated", data.updated_at);
+
+          // ----- SP section -----
+          // Supports either nested sp.* or flat sp_* fields
           const spObj = (data && typeof data.sp === "object") ? data : {{
             sp: {{
               sp_number: data.sp_number,
@@ -343,20 +507,37 @@ def web_order_detail(order_id: int):
             {{ label: "Add'l Vers Of", key: "sp.additional_version_of" }},
           ]);
 
-          // Client fields (best-effort keys)
-          renderSection(clientRows, data, [
-            {{ label: "Client Name", key: "client_name" }},
-            {{ label: "Client Company", key: "client_company_name" }},
-            {{ label: "Client Email", key: "client_email" }},
-            {{ label: "Client Phone", key: "client_phone" }},
-          ]);
+          // ----- Client section (editable fields first) -----
+          clientRows.innerHTML = "";
+          clientNameInput = addInputRow(clientRows, "Client Name", "editClientName", "text");
+          clientCompanyInput = addInputRow(clientRows, "Client Company", "editClientCompany", "text");
+          addRow(clientRows, "Client Email", data.client_email);
+          addRow(clientRows, "Client Phone", data.client_phone);
 
-          // Rep fields
+          // ----- Rep section -----
           renderSection(repRows, data, [
             {{ label: "Rep Code", key: "rep_code" }},
             {{ label: "Rep Name", key: "rep_name" }},
           ]);
 
+          // Baseline values
+          baseline = {{
+            notes: normalize(data.notes),
+            client_name: normalize(data.client_name),
+            client_company_name: normalize(data.client_company_name)
+          }};
+          setDraftFromBaseline();
+
+          // Wire dirty tracking
+          const onChange = () => {{
+            okEl.textContent = "";
+            refreshDirtyUI();
+          }};
+          notesInput.addEventListener("input", onChange);
+          clientNameInput.addEventListener("input", onChange);
+          clientCompanyInput.addEventListener("input", onChange);
+
+          refreshDirtyUI();
           statusEl.textContent = "Loaded.";
         }} catch (e) {{
           statusEl.textContent = "";
