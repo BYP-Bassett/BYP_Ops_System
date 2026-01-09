@@ -148,14 +148,13 @@ class OrderResponse(BaseModel):
     sp_id: Optional[int] = None
     sp: Optional[SPLink] = None
 
+    # Convenience display (non-editable): immediate parent reference for revision/add'l vers
+    parent_display: Optional[str] = None
+
     # workflow
     status: Optional[str] = None
     finalized_at: Optional[str] = None
 
-
-    # timestamps
-    created_at: Optional[str] = None
-    updated_at: Optional[str] = None
     # Trello tracking
     trello_card_id: Optional[str] = None
     trello_checklist_id: Optional[str] = None

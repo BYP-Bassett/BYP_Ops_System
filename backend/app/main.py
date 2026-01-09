@@ -90,14 +90,34 @@ def web_order_detail(order_id: int):
       font-size: 12px;
     }}
     details summary {{ cursor: pointer; }}
+
+    /* Parent display copy widget */
+    .copywrap {{
+      display:flex; gap:8px; align-items:center; flex-wrap:wrap;
+    }}
+    .copywrap input {{
+      width: min(520px, 100%);
+      padding: 8px 10px;
+      border: 1px solid #ccc;
+      border-radius: 10px;
+      font-size: 14px;
+      background: #fff;
+    }}
   </style>
 </head>
 <body>
   <h1>Order <span class="pill">{order_id}</span></h1>
 
   <div class="bar">
-    <button id="backBtn">← Back to Search</button>
+    <button id="backBtn">← Back</button>
     <a class="muted" href="/orders/{order_id}" target="_blank" rel="noopener">Open JSON</a>
+
+    <span class="muted">Parent:</span>
+    <span class="copywrap">
+      <input id="parentDisplay" type="text" readonly value="" placeholder="(none)" />
+      <button id="copyParentBtn" type="button">Copy</button>
+    </span>
+
     <span id="status" class="muted">Loading…</span>
     <span id="error" class="err"></span>
   </div>
@@ -143,6 +163,9 @@ def web_order_detail(order_id: int):
       const clientRows = document.getElementById("clientRows");
       const repRows = document.getElementById("repRows");
       const rawJsonEl = document.getElementById("rawJson");
+
+      const parentInput = document.getElementById("parentDisplay");
+      const copyBtn = document.getElementById("copyParentBtn");
 
       document.getElementById("backBtn").addEventListener("click", () => {{
         // Go back to whatever search/page you came from. If there is no history, fallback to home.
@@ -200,6 +223,74 @@ def web_order_detail(order_id: int):
         }}
       }}
 
+      function computeParentDisplay(data) {{
+        // Prefer server-provided parent_display (FM-style). Fallback to derive from sp.*.
+        const direct = data?.parent_display;
+        if (direct) return direct;
+
+        const sp = data?.sp;
+        const rev = sp?.revision_of;
+        if (rev) return "Revision of " + rev;
+
+        const addl = sp?.additional_version_of;
+        if (addl) return "Add'l vers of " + addl;
+
+        return "";
+      }}
+
+      async function copyText(text) {{
+        if (!text) return;
+        try {{
+          if (navigator.clipboard && navigator.clipboard.writeText) {{
+            await navigator.clipboard.writeText(text);
+            return true;
+          }}
+        }} catch (e) {{
+          // fall through
+        }}
+        try {{
+          const tmp = document.createElement("textarea");
+          tmp.value = text;
+          tmp.style.position = "fixed";
+          tmp.style.left = "-9999px";
+          document.body.appendChild(tmp);
+          tmp.focus();
+          tmp.select();
+          document.execCommand("copy");
+          document.body.removeChild(tmp);
+          return true;
+        }} catch (e) {{
+          return false;
+        }}
+      }}
+
+      function wireCopyWidget() {{
+        const selectAll = () => {{
+          parentInput.focus();
+          parentInput.select();
+          // iOS Safari needs this sometimes; harmless elsewhere.
+          parentInput.setSelectionRange(0, parentInput.value.length);
+        }};
+
+        parentInput.addEventListener("focus", () => {{
+          if (parentInput.value) {{
+            selectAll();
+          }}
+        }});
+
+        parentInput.addEventListener("click", async () => {{
+          if (!parentInput.value) return;
+          selectAll();
+          await copyText(parentInput.value);
+        }});
+
+        copyBtn.addEventListener("click", async () => {{
+          if (!parentInput.value) return;
+          selectAll();
+          await copyText(parentInput.value);
+        }});
+      }}
+
       async function load() {{
         try {{
           errEl.textContent = "";
@@ -210,12 +301,18 @@ def web_order_detail(order_id: int):
 
           if (!res.ok) {{
             statusEl.textContent = "";
-            errEl.textContent = `HTTP ${{res.status}}\n${{text}}`;
+            errEl.textContent = `HTTP ${{res.status}}\\n${{text}}`;
             return;
           }}
 
           const data = JSON.parse(text);
           rawJsonEl.textContent = JSON.stringify(data, null, 2);
+
+          // Parent display (copy/paste weapon)
+          const parentDisplay = computeParentDisplay(data);
+          parentInput.value = parentDisplay || "";
+          parentInput.placeholder = parentDisplay ? "" : "(none)";
+          copyBtn.disabled = !parentDisplay;
 
           // Order fields
           renderSection(orderRows, data, [
@@ -267,6 +364,7 @@ def web_order_detail(order_id: int):
         }}
       }}
 
+      wireCopyWidget();
       load();
     }})();
   </script>

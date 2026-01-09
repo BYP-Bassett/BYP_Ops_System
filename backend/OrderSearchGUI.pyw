@@ -349,7 +349,7 @@ class OrderDetailsWindow(tk.Toplevel):
         ttk.Button(actions, text="New", command=self.on_new).pack(side="left")
         ttk.Button(actions, text="Add'l Vers Of", command=self.on_addl_vers).pack(side="left", padx=(8, 0))
         ttk.Button(actions, text="Duplicate", command=self.on_duplicate).pack(side="left", padx=(8, 0))
-        ttk.Button(actions, text="Revision Of", command=self.on_revision_of).pack(side="left", padx=(8, 0))
+        ttk.Button(actions, text="Revision/Add'l of", command=self.on_revision_of).pack(side="left", padx=(8, 0))
 
         ttk.Separator(actions, orient="vertical").pack(side="left", fill="y", padx=10)
 
@@ -381,6 +381,29 @@ class OrderDetailsWindow(tk.Toplevel):
                 e = ttk.Combobox(body, textvariable=v, values=ASSET_TYPES, width=width, state="disabled")
             else:
                 e = ttk.Entry(body, textvariable=v, width=width)
+
+            # Parent display field: make it stupid-easy to copy/paste.
+            if label == "Revision/Add'l of":
+                def _select_all(_evt=None, _e=e):
+                    try:
+                        _e.after_idle(lambda: (_e.selection_range(0, "end"), _e.icursor("end")))
+                    except Exception:
+                        pass
+
+                def _copy_to_clipboard(_evt=None, _v=v):
+                    txt = (_v.get() or "").strip()
+                    if not txt:
+                        return
+                    try:
+                        self.clipboard_clear()
+                        self.clipboard_append(txt)
+                    except Exception:
+                        pass
+
+                e.bind("<FocusIn>", _select_all)
+                e.bind("<Button-1>", _select_all)
+                e.bind("<ButtonRelease-1>", lambda evt: (_select_all(evt), _copy_to_clipboard(evt)))
+
             e.grid(row=row + 1, column=col, sticky="w", padx=(0, 16), pady=(0, 10))
             self.vars[label] = (v, e)
 
@@ -390,13 +413,12 @@ class OrderDetailsWindow(tk.Toplevel):
 
         add_row(2, 0, "Client Name", 30)
         add_row(2, 1, "Client Company", 34)
-        add_row(2, 2, "Revision Of", 22)
+        add_row(2, 2, "Revision/Add'l of", 22)
 
-        add_row(4, 0, "Add'l Vers Of", 22)
-        add_row(4, 1, "Status", 18)
-        add_row(4, 2, "Trello Card ID", 34)
-
-        add_row(6, 2, "Checklist ID", 34)
+        # Single parent field (either Revision OR Add'l Version) + trello IDs
+        add_row(4, 0, "Status", 18)
+        add_row(4, 1, "Trello Card ID", 34)
+        add_row(4, 2, "Checklist ID", 34)
 
         # Rep (full names shown here; search grid shows initials)
         ttk.Label(body, text="Rep").grid(row=6, column=0, sticky="w", pady=(10, 0))
@@ -415,7 +437,7 @@ class OrderDetailsWindow(tk.Toplevel):
     def _set_entry_state(self, editable: bool):
         for label, (_v, ent) in self.vars.items():
             # Fields that are ALWAYS read-only
-            if label in ("SP Number", "Revision Of", "Add'l Vers Of", "Status", "Trello Card ID", "Checklist ID"):
+            if label in ("SP Number", "Revision Of", "Status", "Trello Card ID", "Checklist ID"):
                 ent.configure(state="readonly")
                 continue
 
@@ -470,8 +492,18 @@ class OrderDetailsWindow(tk.Toplevel):
         set_field("SP Number", sp.get("sp_number", "") if isinstance(sp, dict) else "")
         set_field("Client Name", data.get("client_name", ""))
         set_field("Client Company", data.get("client_company_name", ""))
-        set_field("Revision Of", sp.get("revision_of", "") if isinstance(sp, dict) else "")
-        set_field("Add'l Vers Of", sp.get("additional_version_of", "") if isinstance(sp, dict) else "")
+
+        # One field to rule them all: shows either "Revision/Add'l of SPxxxxxx" OR "Add'l vers of SPxxxxxx"
+        parent_display = (data.get("parent_display") or "").strip()
+        if not parent_display and isinstance(sp, dict):
+            rev = (sp.get("revision_of") or "").strip()
+            addl = (sp.get("additional_version_of") or "").strip()
+            if rev:
+                parent_display = f"Revision of {rev}"
+            elif addl:
+                parent_display = f"Add'l vers of {addl}"
+        set_field("Revision/Add'l of", parent_display)
+
         set_field("Status", status)
         set_field("Trello Card ID", data.get("trello_card_id", ""))
         set_field("Checklist ID", data.get("trello_checklist_id", ""))

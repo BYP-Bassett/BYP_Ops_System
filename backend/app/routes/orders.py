@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 import json
+import re
 
 def _audit_details(order, details=None):
     d = dict(details or {})
@@ -117,6 +118,55 @@ def _prepend_line(text: str | None, first_line: str) -> str:
     if existing:
         return f"{first_line}\n{existing}"
     return first_line
+
+
+def _parent_display(order: Order) -> str | None:
+    """Return FM-style non-editable parent label for copy/paste."""
+    try:
+        sp = getattr(order, 'sp', None)
+        if sp is None:
+            return None
+        rev = getattr(sp, 'revision_of', None)
+        if rev:
+            return f"Revision of {rev}"
+        addl = getattr(sp, 'additional_version_of', None)
+        if addl:
+            return f"Add'l vers of {addl}"
+        return None
+    except Exception:
+        return None
+
+
+
+def _strip_auto_parent_prefixes(text: str | None) -> str:
+    """Strip stacked auto-generated parent reference lines from the top of notes/instructions.
+
+    We only want the immediate parent reference to appear on newly-created revision/add'l-vers orders.
+    Older generations may already contain one or more of these lines; strip them so we don't stack forever.
+    """
+    if not text:
+        return ""
+    lines = text.splitlines()
+
+    header_re = re.compile(r"^(revision of\s+SP\d+|add'l vers of\s+SP\d+)\s*$", re.IGNORECASE)
+
+    i = 0
+    saw_header = False
+    while i < len(lines):
+        line = lines[i].strip()
+        if header_re.match(line):
+            saw_header = True
+            i += 1
+            continue
+        if saw_header and line == "":
+            i += 1
+            continue
+        break
+
+    cleaned = "\n".join(lines[i:])
+    if saw_header:
+        cleaned = cleaned.lstrip("\n")
+    return cleaned
 
 
 def _default_notes_for_new_order(asset_type: str, existing_notes: str | None) -> str | None:
@@ -410,8 +460,10 @@ def revise_order(
 
     parent_sp = (parent.sp.sp_number if getattr(parent, "sp", None) else None)
     prefix_line = f"Revision of {parent_sp}" if parent_sp else ""
-    child_notes = _prepend_line(parent.notes, prefix_line) if prefix_line else (parent.notes or "")
-    child_instructions = _prepend_line(getattr(parent, "instructions", None), prefix_line) if prefix_line else (getattr(parent, "instructions", None) or "")
+    base_notes = _strip_auto_parent_prefixes(parent.notes)
+    base_instructions = _strip_auto_parent_prefixes(getattr(parent, "instructions", None))
+    child_notes = base_notes
+    child_instructions = base_instructions
 
     payload = OrderCreate(
         artist=parent.artist,
@@ -480,8 +532,10 @@ def addl_vers_order(
 
     parent_sp = (parent.sp.sp_number if getattr(parent, "sp", None) else None)
     prefix_line = f"Add'l vers of {parent_sp}" if parent_sp else ""
-    child_notes = _prepend_line(parent.notes, prefix_line) if prefix_line else (parent.notes or "")
-    child_instructions = _prepend_line(getattr(parent, "instructions", None), prefix_line) if prefix_line else (getattr(parent, "instructions", None) or "")
+    base_notes = _strip_auto_parent_prefixes(parent.notes)
+    base_instructions = _strip_auto_parent_prefixes(getattr(parent, "instructions", None))
+    child_notes = base_notes
+    child_instructions = base_instructions
 
     payload = OrderCreate(
         artist=parent.artist,
@@ -610,6 +664,9 @@ def get_order(
 
     if not include_deleted and getattr(order, "is_deleted", False):
         raise HTTPException(status_code=404, detail="Order not found")
+
+    # FM-style convenience label (non-editable)
+    order.parent_display = _parent_display(order)
 
     return order
 
