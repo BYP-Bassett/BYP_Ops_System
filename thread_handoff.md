@@ -3,76 +3,71 @@ _As of 2026-01-08 (America/Chicago)_
 
 ## 1) Current Truth (what is working right now)
 **Repo / environment**
-- Project root (backend): `C:\BYP_Ops_System\backend`
+- Backend root: `C:\BYP_Ops_System\backend`
 - Venv python: `C:\BYP_Ops_System\backend\venv\Scripts\python.exe`
-- Python: 3.13.x
-- DB: SQLite file `backend\byp_ops.db`
+- DB: `backend\byp_ops.db` (SQLite)
+- Engine URL: `sqlite:///./byp_ops.db` (ABS resolves to `C:\BYP_Ops_System\backend\byp_ops.db`)
+- Alembic: head up to date
+
+**Start commands**
+From `C:\BYP_Ops_System\backend`:
 - Start API: `python -m uvicorn app.main:app --reload`
+- Start Tkinter GUI: `.\venv\Scripts\python.exe .\OrderSearchGUI.pyw`
+- Web UI: `http://127.0.0.1:8000/`
 
-**Git**
+**Working endpoints**
+- `/orders/search` — list-only search (server-side filtering)
+- `/orders/search2` — `{ total, items }` search (pagination metadata)
+- `/orders/{id}` — JSON detail
+- `/health` — JSON (because `/` is now HTML)
+
+**Rep fields**
+- `rep_code` + `rep_name` exist end-to-end (DB/model/schemas/routes)
+- Clone ops carry both forward
+- Exact rep filtering uses `rep_code`
+
+## 2) Branch + latest savepoint tags
 - Branch: `fix-delete-override`
-- Savepoint tags you can safely return to:
-  - `savepoint-repcode-2026-01-07` — rep_code end-to-end (DB/API) + circular import fix
-  - `savepoint-rep-carryforward-2026-01-07` — revise/duplicate/add’l vers carry `rep_code/rep_name`
-  - `savepoint-gui-repcode-filter-2026-01-07` — GUI rep filtering uses `rep_code`
-  - `savepoint-gui-enter-and-blankrev-2026-01-07` — Enter-to-search + blank “none/None” in rev columns
-  - `savepoint-gui-window-geometry-2026-01-07` — GUI remembers window size/position + current client-fields row behavior
-  - `savepoint-ignore-handoff-md-2026-01-07` — ignores handoff markdowns in repo root
+- Savepoints (newest first):
+  - `savepoint-webui-v1-search-2026-01-08` — web search UI served at `/` + paging via `/orders/search2`
+  - `savepoint-search2-total-pagination-2026-01-08` — `/search2` returns `{total, items}`; GUI uses `/search2`
+  - `savepoint-search-and-rep-guard-2026-01-08` — server-side filters + rep_code/rep_name sync guard
+  - (older) `savepoint-gui-window-geometry-2026-01-07`, `savepoint-gui-enter-and-blankrev-2026-01-07`, etc.
 
-**Rep fields (confirmed working)**
-- `rep_name` (display string): `SB - Steve Bassett`
-- `rep_code` (initials): `SB`
-- Both exist in: DB `orders` table, SQLAlchemy model, Pydantic schemas, routes.
-- GUI:
-  - Search Rep filter is a dropdown (codes).
-  - “My Drafts” uses `rep_code`.
-  - Rep dropdown in order detail uses full names (display-only).
+## 3) Canonical Rules (don’t violate these)
+- **One step at a time.** One action, then wait for confirmation/error.
+- **No manual file editing.** If a file change is needed:
+  - user uploads the current file
+  - assistant returns a downloadable replacement with the **same exact filename**
+- **No renaming files, ever.**
+- **Windows paths only.**
+- **GUI layout tweaks are pinned** unless explicitly unpinned.
 
-**GUI (current behavior that matters)**
-- Search window has:
-  - Rep dropdown (codes), Clear Search button, Enter-to-search, column width persistence,
-  - “Revision Of” / “Add’l Vers Of” show blank (not “none”) when not applicable,
-  - Client fields toggle adds a second row under the top row without shifting the top row layout,
-  - Window geometry persists between launches.
+## 4) Next Single Target (one task, not a wishlist)
+**Target:** Web UI “order detail” page (read-only HTML view)
 
-## 2) Canonical Rules (don’t violate these)
-- **One step at a time.** Give exactly one action; wait for confirmation/error.
-- **No manual file editing.** If a file needs changes:
-  - user uploads current file
-  - assistant returns a downloadable replacement **with the same exact filename**
-  - **do not rename** files “for convenience.”
-- Windows paths only.
-- **GUI layout tweaks are pinned for later** unless explicitly unpinned.
+**Goal:** Clicking a row in the web table opens a human page (not JSON) showing full order details.
 
-## 3) Next Single Target (one thing only)
-### Target: Move search filtering server-side (API), stop client-side filtering in GUI.
-**Why:** Browser app later will depend on API search; GUI should too. Client-side filtering is slow and fragile.
+**Done when**
+- Web table rows are clickable
+- Clicking a row navigates to `/order/<id>` (HTML page)
+- Page shows core fields + SP block (read-only)
+- Still keeps `/orders/<id>` as JSON API
 
-**Definition of done (DoD)**
-- `/orders/search` supports query params for:
-  - `artist`, `asset_type`, `notes`, `status`, `rep_code`, `client_name`, `client_company`
-- Text fields are **case-insensitive “contains”** matches.
-- Enum-ish fields are exact matches (asset_type/status/rep_code).
-- GUI uses these query params instead of downloading everything and filtering locally.
-- Smoke tests below pass.
-
-**Assumptions if user doesn’t override**
-- `artist/notes/client_*` use case-insensitive contains.
-- Empty query params mean “ignore this filter.”
-- Results order stays current behavior.
-
-## 4) Smoke Tests + Landmines
+## Smoke Tests + Landmines
 **Smoke tests**
-- API up:
-  - `irm http://127.0.0.1:8000/orders/search`
-- DB columns exist:
-  - `python -c "import sqlite3; c=sqlite3.connect('byp_ops.db'); print([r[1] for r in c.execute('PRAGMA table_info(orders)').fetchall()]); c.close()"`
-- Patch rep on draft order:
-  - `irm http://127.0.0.1:8000/orders/<draft_id> -Method Patch -ContentType "application/json" -Body '{"rep_code":"RM","rep_name":"RM - Ron Mewis"}'`
-- Rep carry-forward on clone:
-  - create add’l version / revise from an RM order → new order should stay RM.
+- API reachable:
+  - `irm "http://127.0.0.1:8000/orders/search2?limit=5&offset=0"`
+- Pagination sanity:
+  - `irm "http://127.0.0.1:8000/orders/search2?rep_code=SB&limit=5&offset=0"`
+  - `irm "http://127.0.0.1:8000/orders/search2?rep_code=SB&limit=5&offset=5"`
+- Web UI loads:
+  - open `http://127.0.0.1:8000/` and click **Search**
+- DB sanity:
+  - `.\venv\Scripts\python.exe -c "import sqlite3; c=sqlite3.connect('byp_ops.db'); print(c.execute('select count(1) from orders').fetchone()[0]); c.close()"`
 
 **Landmines**
-- If Uvicorn throws 500s after model/schema changes: usually a mismatch (migration missing) or import loop.
-- PowerShell quoting: outer double quotes, inner single quotes for `python -c`.
-- Git warns about LF/CRLF — ignore unless you enjoy noisy diffs.
+- Empty web table + no server log for `/orders/search2` usually means **JS didn’t load / JS syntax error** → check F12 console + hard refresh `Ctrl+F5`.
+- `/favicon.ico` 404 is harmless.
+- If Uvicorn throws `SyntaxError` pointing at `f\"` / `description=\"`: escaped quotes leaked into Python code again.
+- If port seems “stuck”: kill old Uvicorn (Ctrl+C) or `taskkill /F /IM python.exe`.

@@ -2,62 +2,69 @@
 _As of 2026-01-08 (America/Chicago)_
 
 ## What this is
-Local, Windows-friendly FastAPI + SQLite backend with a Tkinter GUI for reps to:
-- Create/edit/search orders
-- Track revisions / additional versions
-- Finalize orders (with override path)
-- Track rep info cleanly
-Future: browser UI, per-user login/admin, server-side reporting/filtering.
+Windows-first **FastAPI + SQLite + Alembic** backend with:
+- **Tkinter GUI** (`OrderSearchGUI.pyw`) for internal reps to create/edit/search orders
+- **Web UI v1 (vanilla HTML/JS)** for browser-based search (no React, no drama)
 
 ## Paths / environment
 - Backend root: `C:\BYP_Ops_System\backend`
 - Venv python: `C:\BYP_Ops_System\backend\venv\Scripts\python.exe`
-- DB: `backend\byp_ops.db`
-- Run API: `python -m uvicorn app.main:app --reload`
+- DB: `backend\byp_ops.db` (SQLite)
+- SQLAlchemy engine URL: `sqlite:///./byp_ops.db`
+- ABS DB path resolves to: `C:\BYP_Ops_System\backend\byp_ops.db`
+- Alembic: head is up to date
 
-## Git status / savepoints (known good)
+## Start commands
+From `C:\BYP_Ops_System\backend`:
+- Start API: `python -m uvicorn app.main:app --reload`
+- Start Tkinter GUI: `.\venv\Scripts\python.exe .\OrderSearchGUI.pyw`
+- Web UI: open `http://127.0.0.1:8000/`
+
+## Key API endpoints
+- `GET /orders/search` — returns list only (server-side filtering + pagination)
+- `GET /orders/search2` — returns `{ total, items }` (same filters + pagination)
+- `GET /orders/{id}` — returns JSON for a single order
+- `GET /health` — JSON health endpoint (because `/` is now the web UI)
+
+### Search filters (current)
+Contains (case-insensitive):
+- `artist`, `notes`, `client_name`, `client_company` (and legacy alias `client_company_name`), `sp_number` (contains on SP)
+Exact (normalized via trim/case):
+- `asset_type`, `status`, `rep_code`
+
+Pagination:
+- `limit` default 200 (server)
+- `offset` default 0
+- newest-first (id desc)
+- `include_deleted=false` by default (active only)
+
+## Web UI v1 (vanilla)
+Files:
+- `backend\app\web\index.html`
+- `backend\app\web\app.js`
+
+Behavior:
+- Click **Search** to load results (no auto-search on page load)
+- Uses `/orders/search2` and shows “Showing X–Y of TOTAL”
+- Page size is currently **50** in `app.js` (you’ll decide final default later once real web UI sizing is known)
+
+## Rep fields (confirmed, end-to-end)
+- `rep_name` (display): e.g. `SB - Steve Bassett`
+- `rep_code` (initials): e.g. `SB`
+- Clone ops (revise/add’l vers) carry both forward
+- Exact rep filtering is done by `rep_code` (not parsing `rep_name`)
+
+## Git state / safe tags
 Branch: `fix-delete-override`
 
-Key tags:
-- `savepoint-repcode-2026-01-07` — rep_code end-to-end + circular import fix
-- `savepoint-rep-carryforward-2026-01-07` — clone ops carry rep fields forward
-- `savepoint-gui-repcode-filter-2026-01-07` — GUI filtering uses rep_code
-- `savepoint-gui-enter-and-blankrev-2026-01-07` — Enter triggers search + blank “none”
-- `savepoint-gui-window-geometry-2026-01-07` — GUI geometry persists + client fields row doesn’t shift top row
-- `savepoint-ignore-handoff-md-2026-01-07` — ignores handoff markdowns in repo
+Known-good tags (newest first):
+- `savepoint-webui-v1-search-2026-01-08` — web UI v1 + paging/search2
+- `savepoint-search2-total-pagination-2026-01-08` — `/search2` returns `{total, items}`; GUI uses `/search2`
+- `savepoint-search-and-rep-guard-2026-01-08` — server-side filters; rep_code/rep_name sync guard
 
-## Rep fields (canonical)
-- Display format: `SB - Steve Bassett` (stored as `rep_name`)
-- Code: `SB` (stored as `rep_code`)
-Both are present/working end-to-end in DB/model/schemas/routes; clone ops carry forward.
-
-## GUI (OrderSearchGUI.pyw) — current UX decisions
-- Rep filter dropdown of codes; “My Drafts” filters by rep_code.
-- Enter-to-search across search widgets.
-- “Revision Of” / “Add’l Vers Of” show blank when not applicable.
-- Client fields toggle adds a clean second row using a sub-frame so top row never shifts.
-- Clear Search resets all fields and reloads all.
-- Column widths persist via `OrderSearchGUI_prefs.json`.
-- Window geometry/state persists via `OrderSearchGUI_prefs.json`.
-
-Pinned for later:
-- Further layout/pixel tweaking unless explicitly unpinned.
-
-## Files that matter
-- `OrderSearchGUI.pyw`
-- `OrderSearchGUI_prefs.json`
-- `app\routes\orders.py`
-- `byp_ops.db` + Alembic migrations (head up to date)
-
-## Known sharp edges / previous failures
-- “Blank GUI” can be an API 500 (schema/model mismatch) not a UI bug.
-- Circular import previously broke Uvicorn; avoid models importing themselves.
-- PowerShell quoting traps with `python -c`.
-
-## Do NOT ask the user (already answered)
-- Using SQLite? Yes (`byp_ops.db`).
-- How to restart Uvicorn? Command above.
-- Do rep_name/rep_code exist? Yes, end-to-end.
-
-## Next logical work
-- Server-side `/orders/search` filtering with query params; update GUI to use it.
+## Known sharp edges / landmines
+- **Blank GUI** often means API is throwing 500s (schema/model mismatch), not Tkinter “breaking”.
+- **Port stuck**: old Uvicorn still running → Ctrl+C that window.
+- **PowerShell quoting**: avoid nested escaping; prefer simple commands or parameters.
+- If you see `SyntaxError` with `f\"` or `description=\"` in Python: you’ve got escaped quotes in Python code again. Fix immediately.
+- `/favicon.ico 404` in server logs is harmless browser noise.

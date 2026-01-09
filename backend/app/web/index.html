@@ -26,6 +26,12 @@
     .small { font-size: 12px; color: #555; }
     .err { color: #b00020; font-weight: 600; }
     .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; }
+  
+    /* Clickable rows */
+    tbody tr.clickrow { cursor: pointer; }
+    tbody tr.clickrow:hover { background: #f6f6f6; }
+    tbody tr.clickrow:focus { outline: 2px solid #999; outline-offset: -2px; }
+
   </style>
 </head>
 <body>
@@ -108,7 +114,7 @@
 
   <div class="status">
     <div>
-      <span id="summary" class="muted">Ready.</span>
+      <span id="summary" class="muted">Ready. (Tip: click a row to open details)</span>
       <span id="error" class="err"></span>
     </div>
     <div style="display:flex; gap:10px; align-items:center;">

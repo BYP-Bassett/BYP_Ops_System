@@ -28,6 +28,55 @@
     rows: $("rows"),
   };
 
+
+  const STATE_KEY = "byp_ops_search_state_v1";
+
+  function saveState() {
+    try {
+      const state = {
+        offset,
+        artist: els.artist.value,
+        notes: els.notes.value,
+        client_name: els.client_name.value,
+        client_company: els.client_company.value,
+        asset_type: els.asset_type.value,
+        status: els.status.value,
+        rep_code: els.rep_code.value,
+        sp_number: els.sp_number.value,
+        include_deleted: !!els.include_deleted.checked,
+      };
+      sessionStorage.setItem(STATE_KEY, JSON.stringify(state));
+    } catch (_) {
+      // ignore
+    }
+  }
+
+  function loadState() {
+    try {
+      const raw = sessionStorage.getItem(STATE_KEY);
+      if (!raw) return false;
+      const state = JSON.parse(raw);
+      if (!state || typeof state !== "object") return false;
+
+      els.artist.value = state.artist ?? "";
+      els.notes.value = state.notes ?? "";
+      els.client_name.value = state.client_name ?? "";
+      els.client_company.value = state.client_company ?? "";
+      els.asset_type.value = state.asset_type ?? "";
+      els.status.value = state.status ?? "";
+      els.rep_code.value = state.rep_code ?? "";
+      els.sp_number.value = state.sp_number ?? "";
+      els.include_deleted.checked = !!state.include_deleted;
+
+      offset = Number(state.offset ?? 0) || 0;
+      if (offset < 0) offset = 0;
+
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
   function esc(v) {
     const s = String(v ?? "");
     return s
@@ -71,11 +120,19 @@
     els.rows.innerHTML = "";
   }
 
+  function openDetail(id) {
+    saveState();
+    window.location.href = `/order/${encodeURIComponent(id)}`;
+  }
+
   function render(items) {
     clearTable();
 
     for (const o of items) {
       const tr = document.createElement("tr");
+      tr.classList.add("clickrow");
+      tr.tabIndex = 0;
+      tr.title = "Open order details";
       tr.innerHTML =
         "<td class=\"nowrap\">" + esc(o.id) + "</td>" +
         "<td>" + esc(o.artist) + "</td>" +
@@ -84,6 +141,11 @@
         "<td class=\"nowrap\">" + esc(o.rep_code) + "</td>" +
         "<td>" + esc(o.client_company_name) + "</td>" +
         "<td>" + esc(o.notes) + "</td>";
+      tr.addEventListener("click", () => openDetail(o.id));
+      tr.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") openDetail(o.id);
+      });
+
       els.rows.appendChild(tr);
     }
   }
@@ -91,6 +153,8 @@
   async function runSearch(resetOffset) {
     if (resetOffset) offset = 0;
 
+    // Persist current filters + paging so Back works without re-searching.
+    saveState();
     els.error.textContent = "";
     els.summary.textContent = "Searching…";
 
@@ -127,7 +191,7 @@
   }
 
   function clearFilters() {
-    els.artist.value = "";
+els.artist.value = "";
     els.notes.value = "";
     els.client_name.value = "";
     els.client_company.value = "";
@@ -142,7 +206,8 @@
     els.summary.textContent = "Ready.";
     els.error.textContent = "";
     clearTable();
-    setPagerButtons();
+    // After clearing, show the default list again.
+    runSearch(true);
   }
 
   // Wire up events
@@ -168,4 +233,8 @@
 
   // Initial state
   setPagerButtons();
+
+  // Auto-load results on first open, and restore last search when returning.
+  const hadState = loadState();
+  runSearch(!hadState);
 })();
