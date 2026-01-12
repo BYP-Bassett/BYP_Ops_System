@@ -361,8 +361,8 @@ def create_order(
 @router.post("/{order_id}/finalize", response_model=OrderResponse)
 def finalize(
     order_id: int,
-    trello_card_id: str = Query(..., description="Trello card id that already exists for this order."),
-    trello_checklist_id: str = Query(..., description="Checklist id on that card (named as SP Number)."),
+    trello_card_id: str | None = Query(default=None, description="Optional: Trello card id. If omitted, uses stored value on the order."),
+    trello_checklist_id: str | None = Query(default=None, description="Optional: Trello checklist id. If omitted, uses stored value on the order."),
     db: Session = Depends(get_db),
     initials: str | None = Query(default=None, description="Your initials for audit log (optional)."),
 ):
@@ -372,12 +372,24 @@ def finalize(
 
     before = _order_snapshot(order)
 
-    trello_card_id = (trello_card_id or "").strip()
-    trello_checklist_id = (trello_checklist_id or "").strip()
-    if not trello_card_id or not trello_checklist_id:
-        raise HTTPException(status_code=400, detail="trello_card_id and trello_checklist_id are required")
+    # Prefer explicit query params; otherwise fall back to stored linkage on the order.
+    card_id = (trello_card_id or "").strip() or (getattr(order, "trello_card_id", None) or "").strip()
+    checklist_id = (trello_checklist_id or "").strip() or (getattr(order, "trello_checklist_id", None) or "").strip()
 
-    updated = finalize_order(db, order, trello_card_id, trello_checklist_id)
+    # Let the service handle missing Trello linkage:
+    # - radio/video: auto-create Trello card + SP# checklist if missing
+    # - other assets: will raise if linkage is missing (art comes later)
+    try:
+        updated = finalize_order(
+            db,
+            order,
+            (card_id or None),
+            (checklist_id or None),
+        )
+    except TrelloConfigError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
     # Ensure SP joined (finalize_order may return the same instance, but we want a stable snapshot)
     updated = (

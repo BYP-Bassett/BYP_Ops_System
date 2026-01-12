@@ -32,7 +32,8 @@ def web_root():
 @app.get("/order/{order_id}", include_in_schema=False)
 def web_order_detail(order_id: int):
     # HTML page that fetches /orders/{id} JSON and renders it (human-friendly).
-    # Now supports inline edit + Save for a small set of fields.
+    # Supports inline edit + Save for a small set of fields + Revise/Add'l Vers + Finalize/Unfinalize actions.
+    # NOTE: Keep JS syntax conservative (avoid optional-chaining) to support older mobile browsers.
     html = f"""<!doctype html>
 <html lang="en">
 <head>
@@ -148,6 +149,12 @@ def web_order_detail(order_id: int):
     <button id="saveBtn" type="button" disabled>Save</button>
     <button id="resetBtn" type="button" disabled>Reset</button>
 
+    <button id="finalizeBtn" type="button" disabled>Finalize</button>
+    <button id="unfinalizeBtn" type="button" disabled>Unfinalize</button>
+
+    <button id="reviseBtn" type="button" disabled>Revise</button>
+    <button id="addlBtn" type="button" disabled>Add'l Vers</button>
+
     <span id="status" class="muted">Loading…</span>
     <span id="ok" class="ok"></span>
     <span id="error" class="err"></span>
@@ -185,46 +192,49 @@ def web_order_detail(order_id: int):
   </div>
 
   <script>
-    (() => {{
-      const ORDER_ID = {order_id};
+    (function() {{
+      var ORDER_ID = {order_id};
 
-      const statusEl = document.getElementById("status");
-      const okEl = document.getElementById("ok");
-      const errEl = document.getElementById("error");
+      var statusEl = document.getElementById("status");
+      var okEl = document.getElementById("ok");
+      var errEl = document.getElementById("error");
 
-      const saveBtn = document.getElementById("saveBtn");
-      const resetBtn = document.getElementById("resetBtn");
+      var saveBtn = document.getElementById("saveBtn");
+      var resetBtn = document.getElementById("resetBtn");
+      var finalizeBtn = document.getElementById("finalizeBtn");
+      var unfinalizeBtn = document.getElementById("unfinalizeBtn");
+      var reviseBtn = document.getElementById("reviseBtn");
+      var addlBtn = document.getElementById("addlBtn");
 
-      const orderRows = document.getElementById("orderRows");
-      const spRows = document.getElementById("spRows");
-      const clientRows = document.getElementById("clientRows");
-      const repRows = document.getElementById("repRows");
-      const rawJsonEl = document.getElementById("rawJson");
+      var orderRows = document.getElementById("orderRows");
+      var spRows = document.getElementById("spRows");
+      var clientRows = document.getElementById("clientRows");
+      var repRows = document.getElementById("repRows");
+      var rawJsonEl = document.getElementById("rawJson");
 
-      const parentInput = document.getElementById("parentDisplay");
-      const copyBtn = document.getElementById("copyParentBtn");
+      var parentInput = document.getElementById("parentDisplay");
+      var copyBtn = document.getElementById("copyParentBtn");
 
       // Editable inputs
-      let notesInput = null;
-      let clientNameInput = null;
-      let clientCompanyInput = null;
+      var notesInput = null;
+      var clientNameInput = null;
+      var clientCompanyInput = null;
 
       // Track last-loaded values so we can enable Save only when dirty
-      let baseline = {{
+      var baseline = {{
         notes: "",
         client_name: "",
         client_company_name: ""
       }};
 
-      let isSaving = false;
-
-      document.getElementById("backBtn").addEventListener("click", () => {{
-        // Always go to main search (and force refresh so new/edited orders show immediately).
-        window.location.href = "/?refresh=1";
+      document.getElementById("backBtn").addEventListener("click", function() {{
+        // Always go back to main search.
+        window.location.href = "/";
       }});
 
       function esc(s) {{
-        return String(s ?? "")
+        var v = (s === null || s === undefined) ? "" : String(s);
+        return v
           .replace(/&/g, "&amp;")
           .replace(/</g, "&lt;")
           .replace(/>/g, "&gt;")
@@ -234,21 +244,21 @@ def web_order_detail(order_id: int):
 
       function getVal(obj, path) {{
         if (!obj) return undefined;
-        const parts = path.split(".");
-        let cur = obj;
-        for (const p of parts) {{
-          if (cur == null) return undefined;
-          cur = cur[p];
+        var parts = path.split(".");
+        var cur = obj;
+        for (var i = 0; i < parts.length; i++) {{
+          if (cur === null || cur === undefined) return undefined;
+          cur = cur[parts[i]];
         }}
         return cur;
       }}
 
       function addRow(tbody, label, value) {{
-        const tr = document.createElement("tr");
-        const th = document.createElement("th");
+        var tr = document.createElement("tr");
+        var th = document.createElement("th");
         th.textContent = label;
 
-        const td = document.createElement("td");
+        var td = document.createElement("td");
         if (value === null || value === undefined || value === "") {{
           td.innerHTML = "<span class='muted'>(blank)</span>";
         }} else if (typeof value === "object") {{
@@ -263,13 +273,13 @@ def web_order_detail(order_id: int):
       }}
 
       function addInputRow(tbody, label, id, kind) {{
-        const tr = document.createElement("tr");
+        var tr = document.createElement("tr");
 
-        const th = document.createElement("th");
+        var th = document.createElement("th");
         th.textContent = label;
 
-        const td = document.createElement("td");
-        let input;
+        var td = document.createElement("td");
+        var input;
         if (kind === "textarea") {{
           input = document.createElement("textarea");
         }} else {{
@@ -289,39 +299,49 @@ def web_order_detail(order_id: int):
 
       function renderSection(tbody, data, fields) {{
         tbody.innerHTML = "";
-        for (const f of fields) {{
-          const val = getVal(data, f.key);
+        for (var i = 0; i < fields.length; i++) {{
+          var f = fields[i];
+          var val = getVal(data, f.key);
           addRow(tbody, f.label, val);
         }}
       }}
 
       function computeParentDisplay(data) {{
         // Prefer server-provided parent_display (FM-style). Fallback to derive from sp.*.
-        const direct = data?.parent_display;
-        if (direct) return direct;
+        if (data && data.parent_display) return data.parent_display;
 
-        const sp = data?.sp;
-        const rev = sp?.revision_of;
+        var sp = (data && data.sp) ? data.sp : null;
+        var rev = sp ? sp.revision_of : null;
         if (rev) return "Revision of " + rev;
 
-        const addl = sp?.additional_version_of;
+        var addl = sp ? sp.additional_version_of : null;
         if (addl) return "Add'l vers of " + addl;
 
         return "";
       }}
 
-      async function copyText(text) {{
-        if (!text) return;
+      function copyText(text, done) {{
+        if (!text) return done(false);
+
+        // Prefer modern clipboard API when available.
         try {{
           if (navigator.clipboard && navigator.clipboard.writeText) {{
-            await navigator.clipboard.writeText(text);
-            return true;
+            navigator.clipboard.writeText(text).then(function() {{
+              done(true);
+            }}).catch(function() {{
+              legacyCopy(text, done);
+            }});
+            return;
           }}
         }} catch (e) {{
           // fall through
         }}
+        legacyCopy(text, done);
+      }}
+
+      function legacyCopy(text, done) {{
         try {{
-          const tmp = document.createElement("textarea");
+          var tmp = document.createElement("textarea");
           tmp.value = text;
           tmp.style.position = "fixed";
           tmp.style.left = "-9999px";
@@ -330,48 +350,47 @@ def web_order_detail(order_id: int):
           tmp.select();
           document.execCommand("copy");
           document.body.removeChild(tmp);
-          return true;
+          done(true);
         }} catch (e) {{
-          return false;
+          done(false);
         }}
       }}
 
       function wireCopyWidget() {{
-        const selectAll = () => {{
+        function selectAll() {{
           parentInput.focus();
           parentInput.select();
-          // iOS Safari needs this sometimes; harmless elsewhere.
           parentInput.setSelectionRange(0, parentInput.value.length);
-        }};
+        }}
 
-        parentInput.addEventListener("focus", () => {{
+        parentInput.addEventListener("focus", function() {{
           if (parentInput.value) {{
             selectAll();
           }}
         }});
 
-        parentInput.addEventListener("click", async () => {{
+        parentInput.addEventListener("click", function() {{
           if (!parentInput.value) return;
           selectAll();
-          await copyText(parentInput.value);
+          copyText(parentInput.value, function(){{}});
         }});
 
-        copyBtn.addEventListener("click", async () => {{
+        copyBtn.addEventListener("click", function() {{
           if (!parentInput.value) return;
           selectAll();
-          await copyText(parentInput.value);
+          copyText(parentInput.value, function(){{}});
         }});
       }}
 
       function normalize(s) {{
-        return String(s ?? "");
+        return (s === null || s === undefined) ? "" : String(s);
       }}
 
       function getDraft() {{
         return {{
-          notes: normalize(notesInput?.value),
-          client_name: normalize(clientNameInput?.value),
-          client_company_name: normalize(clientCompanyInput?.value)
+          notes: normalize(notesInput ? notesInput.value : ""),
+          client_name: normalize(clientNameInput ? clientNameInput.value : ""),
+          client_company_name: normalize(clientCompanyInput ? clientCompanyInput.value : "")
         }};
       }}
 
@@ -382,7 +401,7 @@ def web_order_detail(order_id: int):
       }}
 
       function isDirty() {{
-        const d = getDraft();
+        var d = getDraft();
         return (
           d.notes !== baseline.notes ||
           d.client_name !== baseline.client_name ||
@@ -391,158 +410,275 @@ def web_order_detail(order_id: int):
       }}
 
       function refreshDirtyUI() {{
-        const dirty = isDirty();
-        // Save should always be allowed (even if nothing changed) so users can "save as is".
-        saveBtn.disabled = !!isSaving;
-        resetBtn.disabled = !!isSaving ? true : !dirty;
+        var dirty = isDirty();
+        saveBtn.disabled = !dirty;
+        resetBtn.disabled = !dirty;
       }}
 
-      async function save() {{
-        try {{
-          okEl.textContent = "";
-          errEl.textContent = "";
-          statusEl.textContent = "Saving…";
-          isSaving = true;
-          refreshDirtyUI();
+      function setBusy(msg) {{
+        statusEl.textContent = msg || "";
+      }}
 
-          const d = getDraft();
-          const payload = {{
-            notes: d.notes,
-            client_name: d.client_name,
-            client_company_name: d.client_company_name
-          }};
+      function clearMsgs() {{
+        okEl.textContent = "";
+        errEl.textContent = "";
+      }}
 
-          const res = await fetch("/orders/" + ORDER_ID, {{
-            method: "PATCH",
-            headers: {{
-              "Content-Type": "application/json"
-            }},
-            body: JSON.stringify(payload)
+      function setActionsDisabled(disabled) {{
+        reviseBtn.disabled = disabled || reviseBtn.disabled;
+        addlBtn.disabled = disabled || addlBtn.disabled;
+        finalizeBtn.disabled = disabled || finalizeBtn.disabled;
+        unfinalizeBtn.disabled = disabled || unfinalizeBtn.disabled;
+      }}
+
+      function save() {{
+        clearMsgs();
+        setBusy("Saving…");
+        saveBtn.disabled = true;
+
+        var d = getDraft();
+        var payload = {{
+          notes: d.notes,
+          client_name: d.client_name,
+          client_company_name: d.client_company_name
+        }};
+
+        fetch("/orders/" + ORDER_ID, {{
+          method: "PATCH",
+          headers: {{ "Content-Type": "application/json" }},
+          body: JSON.stringify(payload)
+        }})
+        .then(function(res) {{
+          return res.text().then(function(text) {{
+            if (!res.ok) {{
+              setBusy("");
+              errEl.textContent = "HTTP " + res.status + "\\n" + text;
+              refreshDirtyUI();
+              return null;
+            }}
+            okEl.textContent = "Saved.";
+            return true;
           }});
-
-          const text = await res.text();
-
-          if (!res.ok) {{
-            statusEl.textContent = "";
-            errEl.textContent = "HTTP " + res.status + "\\n" + text;
-            isSaving = false;
-            refreshDirtyUI();
-            return;
-          }}
-
-          okEl.textContent = "Saved.";
-          // Reload to show updated_at + any server-side normalization
-          await load();
-          isSaving = false;
-          refreshDirtyUI();
-        }} catch (e) {{
-          statusEl.textContent = "";
+        }})
+        .then(function(ok) {{
+          if (ok) load(); // reload to show updated_at + any server-side normalization
+        }})
+        .catch(function(e) {{
+          setBusy("");
           errEl.textContent = String(e);
-          isSaving = false;
           refreshDirtyUI();
-        }}
+        }});
       }}
 
       saveBtn.addEventListener("click", save);
 
-      resetBtn.addEventListener("click", () => {{
-        okEl.textContent = "";
-        errEl.textContent = "";
+      resetBtn.addEventListener("click", function() {{
+        clearMsgs();
         setDraftFromBaseline();
         refreshDirtyUI();
       }});
 
-      async function load() {{
-        try {{
-          okEl.textContent = "";
-          errEl.textContent = "";
-          statusEl.textContent = "Fetching…";
+      function postAndGo(path) {{
+        clearMsgs();
+        setBusy("Working…");
+        reviseBtn.disabled = true;
+        addlBtn.disabled = true;
+        finalizeBtn.disabled = true;
+        unfinalizeBtn.disabled = true;
 
-          const res = await fetch("/orders/" + ORDER_ID);
-          const text = await res.text();
+        fetch(path, {{ method: "POST" }})
+          .then(function(res) {{
+            return res.text().then(function(text) {{
+              if (!res.ok) {{
+                setBusy("");
+                errEl.textContent = "HTTP " + res.status + "\\n" + text;
+                return null;
+              }}
+              try {{
+                return JSON.parse(text);
+              }} catch (e) {{
+                setBusy("");
+                errEl.textContent = "Bad JSON response\\n" + text;
+                return null;
+              }}
+            }});
+          }})
+          .then(function(data) {{
+            if (!data || !data.id) return;
+            // Replace so browser Back goes to search, not back to this order.
+            window.location.replace("/order/" + data.id);
+          }})
+          .catch(function(e) {{
+            setBusy("");
+            errEl.textContent = String(e);
+          }});
+      }}
 
-          if (!res.ok) {{
-            statusEl.textContent = "";
-            errEl.textContent = "HTTP " + res.status + "\\n" + text;
-            return;
-          }}
+      function postAndReload(path, okMsg) {{
+        clearMsgs();
+        setBusy("Working…");
+        reviseBtn.disabled = true;
+        addlBtn.disabled = true;
+        finalizeBtn.disabled = true;
+        unfinalizeBtn.disabled = true;
 
-          const data = JSON.parse(text);
-          rawJsonEl.textContent = JSON.stringify(data, null, 2);
+        fetch(path, {{ method: "POST" }})
+          .then(function(res) {{
+            return res.text().then(function(text) {{
+              if (!res.ok) {{
+                setBusy("");
+                errEl.textContent = "HTTP " + res.status + "\\n" + text;
+                return null;
+              }}
+              okEl.textContent = okMsg || "Done.";
+              return true;
+            }});
+          }})
+          .then(function(ok) {{
+            if (ok) load();
+          }})
+          .catch(function(e) {{
+            setBusy("");
+            errEl.textContent = String(e);
+          }});
+      }}
 
-          // Parent display (copy/paste weapon)
-          const parentDisplay = computeParentDisplay(data);
-          parentInput.value = parentDisplay || "";
-          parentInput.placeholder = parentDisplay ? "" : "(none)";
-          copyBtn.disabled = !parentDisplay;
+      reviseBtn.addEventListener("click", function() {{
+        postAndGo("/orders/" + ORDER_ID + "/revise");
+      }});
 
-          // ----- Order section (Notes editable) -----
-          orderRows.innerHTML = "";
-          addRow(orderRows, "ID", data.id);
-          addRow(orderRows, "Artist", data.artist);
-          addRow(orderRows, "Asset Type", data.asset_type);
-          addRow(orderRows, "Status", data.status);
+      addlBtn.addEventListener("click", function() {{
+        postAndGo("/orders/" + ORDER_ID + "/addl_vers");
+      }});
 
-          notesInput = addInputRow(orderRows, "Notes", "editNotes", "textarea");
+      finalizeBtn.addEventListener("click", function() {{
+        postAndReload("/orders/" + ORDER_ID + "/finalize", "Finalized.");
+      }});
 
-          addRow(orderRows, "Deleted?", data.is_deleted);
-          addRow(orderRows, "Created", data.created_at);
-          addRow(orderRows, "Updated", data.updated_at);
+      unfinalizeBtn.addEventListener("click", function() {{
+        postAndReload("/orders/" + ORDER_ID + "/unfinalize", "Unfinalized.");
+      }});
 
-          // ----- SP section -----
-          // Supports either nested sp.* or flat sp_* fields
-          const spObj = (data && typeof data.sp === "object") ? data : {{
-            sp: {{
-              sp_number: data.sp_number,
-              order_type: data.sp_order_type || data.order_type,
-              revision_of: data.sp_revision_of || data.revision_of,
-              additional_version_of: data.additional_version_of,
+      function load() {{
+        clearMsgs();
+        setBusy("Fetching…");
+
+        fetch("/orders/" + ORDER_ID)
+          .then(function(res) {{
+            return res.text().then(function(text) {{
+              if (!res.ok) {{
+                setBusy("");
+                errEl.textContent = "HTTP " + res.status + "\\n" + text;
+                return null;
+              }}
+              try {{
+                return JSON.parse(text);
+              }} catch (e) {{
+                setBusy("");
+                errEl.textContent = "Bad JSON\\n" + text;
+                return null;
+              }}
+            }});
+          }})
+          .then(function(data) {{
+            if (!data) return;
+
+            rawJsonEl.textContent = JSON.stringify(data, null, 2);
+
+            // Parent display (copy/paste weapon)
+            var parentDisplay = computeParentDisplay(data);
+            parentInput.value = parentDisplay || "";
+            parentInput.placeholder = parentDisplay ? "" : "(none)";
+            copyBtn.disabled = !parentDisplay;
+
+            // ----- Order section (Notes editable) -----
+            orderRows.innerHTML = "";
+            addRow(orderRows, "ID", data.id);
+            addRow(orderRows, "Artist", data.artist);
+            addRow(orderRows, "Asset Type", data.asset_type);
+            addRow(orderRows, "Status", data.status);
+
+            notesInput = addInputRow(orderRows, "Notes", "editNotes", "textarea");
+
+            addRow(orderRows, "Deleted?", data.is_deleted);
+            addRow(orderRows, "Created", data.created_at);
+            addRow(orderRows, "Updated", data.updated_at);
+
+            // ----- SP section -----
+            var spObj;
+            if (data && typeof data.sp === "object" && data.sp) {{
+              spObj = data;
+            }} else {{
+              spObj = {{
+                sp: {{
+                  sp_number: data.sp_number,
+                  order_type: data.sp_order_type || data.order_type,
+                  revision_of: data.sp_revision_of || data.revision_of,
+                  additional_version_of: data.additional_version_of
+                }}
+              }};
             }}
-          }};
 
-          renderSection(spRows, spObj, [
-            {{ label: "SP Number", key: "sp.sp_number" }},
-            {{ label: "Order Type", key: "sp.order_type" }},
-            {{ label: "Revision Of", key: "sp.revision_of" }},
-            {{ label: "Add'l Vers Of", key: "sp.additional_version_of" }},
-          ]);
+            renderSection(spRows, spObj, [
+              {{ label: "SP Number", key: "sp.sp_number" }},
+              {{ label: "Order Type", key: "sp.order_type" }},
+              {{ label: "Revision Of", key: "sp.revision_of" }},
+              {{ label: "Add'l Vers Of", key: "sp.additional_version_of" }}
+            ]);
 
-          // ----- Client section (editable fields first) -----
-          clientRows.innerHTML = "";
-          clientNameInput = addInputRow(clientRows, "Client Name", "editClientName", "text");
-          clientCompanyInput = addInputRow(clientRows, "Client Company", "editClientCompany", "text");
-          addRow(clientRows, "Client Email", data.client_email);
-          addRow(clientRows, "Client Phone", data.client_phone);
+            // ----- Client section (editable fields first) -----
+            clientRows.innerHTML = "";
+            clientNameInput = addInputRow(clientRows, "Client Name", "editClientName", "text");
+            clientCompanyInput = addInputRow(clientRows, "Client Company", "editClientCompany", "text");
+            addRow(clientRows, "Client Email", data.client_email);
+            addRow(clientRows, "Client Phone", data.client_phone);
 
-          // ----- Rep section -----
-          renderSection(repRows, data, [
-            {{ label: "Rep Code", key: "rep_code" }},
-            {{ label: "Rep Name", key: "rep_name" }},
-          ]);
+            // ----- Rep section -----
+            renderSection(repRows, data, [
+              {{ label: "Rep Code", key: "rep_code" }},
+              {{ label: "Rep Name", key: "rep_name" }}
+            ]);
 
-          // Baseline values
-          baseline = {{
-            notes: normalize(data.notes),
-            client_name: normalize(data.client_name),
-            client_company_name: normalize(data.client_company_name)
-          }};
-          setDraftFromBaseline();
+            // Baseline values
+            baseline = {{
+              notes: normalize(data.notes),
+              client_name: normalize(data.client_name),
+              client_company_name: normalize(data.client_company_name)
+            }};
+            setDraftFromBaseline();
 
-          // Wire dirty tracking
-          const onChange = () => {{
-            okEl.textContent = "";
+            // Wire dirty tracking
+            function onChange() {{
+              okEl.textContent = "";
+              refreshDirtyUI();
+            }}
+            notesInput.addEventListener("input", onChange);
+            clientNameInput.addEventListener("input", onChange);
+            clientCompanyInput.addEventListener("input", onChange);
+
+            // Enable action buttons once we know the order exists
+            reviseBtn.disabled = false;
+            addlBtn.disabled = false;
+
+            // Finalize/Unfinalize: best-effort based on finalized_at or status text
+            var isFinal = false;
+            if (data && data.finalized_at) {{
+              isFinal = true;
+            }} else if (data && data.status) {{
+              var s = String(data.status).toLowerCase();
+              if (s.indexOf("final") >= 0) isFinal = true;
+            }}
+
+            finalizeBtn.disabled = isFinal;
+            unfinalizeBtn.disabled = !isFinal;
+
             refreshDirtyUI();
-          }};
-          notesInput.addEventListener("input", onChange);
-          clientNameInput.addEventListener("input", onChange);
-          clientCompanyInput.addEventListener("input", onChange);
-
-          refreshDirtyUI();
-          statusEl.textContent = "Loaded.";
-        }} catch (e) {{
-          statusEl.textContent = "";
-          errEl.textContent = String(e);
-        }}
+            setBusy("Loaded.");
+          }})
+          .catch(function(e) {{
+            setBusy("");
+            errEl.textContent = String(e);
+          }});
       }}
 
       wireCopyWidget();
