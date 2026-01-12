@@ -5,6 +5,8 @@ from __future__ import annotations
 import os
 from datetime import datetime
 
+
+from app.core.config import ensure_env_loaded
 from sqlalchemy.orm import Session
 
 from app.models.orders import Order
@@ -15,6 +17,10 @@ from app.services.trello_service import (
     find_list_id_by_name,
 )
 
+
+
+# Load backend/.env so Trello vars work without manual env setup
+ensure_env_loaded()
 
 def get_order_by_id(db: Session, order_id: int):
     return db.query(Order).filter(Order.id == order_id).first()

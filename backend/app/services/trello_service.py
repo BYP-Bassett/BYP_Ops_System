@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import json
 import os
+from app.core.config import ensure_env_loaded
+
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
@@ -21,6 +23,7 @@ class TrelloConfigError(RuntimeError):
 
 
 def _trello_auth_params() -> dict:
+    ensure_env_loaded()
     key = os.environ.get("TRELLO_KEY", "").strip()
     token = os.environ.get("TRELLO_TOKEN", "").strip()
     if not key or not token:
@@ -40,6 +43,22 @@ def _http_json(method: str, url: str, payload: dict | None = None, timeout: int 
         raw = resp.read().decode("utf-8", errors="replace")
         return json.loads(raw) if raw else {}
 
+
+
+def card_exists(card_id: str) -> bool:
+    """Return True if the Trello card id is accessible with current key/token."""
+    cid = (card_id or "").strip()
+    if not cid:
+        return False
+    auth = _trello_auth_params()
+    url = f"{TRELLO_API_BASE}/cards/{cid}?{urlencode(auth)}"
+    try:
+        _http_json("GET", url, payload=None, timeout=20)
+        return True
+    except HTTPError as e:
+        if getattr(e, "code", None) == 404:
+            return False
+        raise
 
 def _delete_checklist(checklist_id: str) -> None:
     auth = _trello_auth_params()

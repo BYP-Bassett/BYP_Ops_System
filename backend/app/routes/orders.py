@@ -29,7 +29,7 @@ from app.models.orders import Order
 from app.models.sp_master import SPNumber
 from app.models.audit_log import AuditLog
 from app.services.order_service import create_order as create_order_service, finalize_order
-from app.services.trello_service import rebuild_order_checklist, TrelloConfigError
+from app.services.trello_service import rebuild_order_checklist, TrelloConfigError, card_exists
 
 router = APIRouter(prefix="/orders", tags=["Orders"])
 
@@ -498,6 +498,27 @@ def revise_order(
     )
 
     new_order = create_order_service(db, payload)
+    # Revisions should stay on the SAME Trello card as the parent (if it exists).
+    # IMPORTANT: we do NOT carry forward the checklist id, so finalize will create a fresh SP# checklist
+    # on the existing card for this revision.
+    parent_card_id = (getattr(parent, "trello_card_id", None) or "").strip()
+    parent_checklist_id = (getattr(parent, "trello_checklist_id", None) or "").strip()
+    
+    resolved_card_id = None
+    if parent_card_id and card_exists(parent_card_id):
+        resolved_card_id = parent_card_id
+    elif parent_checklist_id and card_exists(parent_checklist_id):
+        # Looks like the parent stored IDs were swapped (card id stored in trello_checklist_id). Repair parent and use the real card id.
+        resolved_card_id = parent_checklist_id
+        if parent_card_id:
+            parent.trello_checklist_id = parent_card_id
+        parent.trello_card_id = parent_checklist_id
+        db.commit()
+    
+    if resolved_card_id:
+        new_order.trello_card_id = resolved_card_id
+        new_order.trello_checklist_id = None
+
     # Carry forward rep fields from parent (create service may apply defaults)
     if getattr(parent, "rep_name", None) is not None:
         new_order.rep_name = parent.rep_name
