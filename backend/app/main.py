@@ -164,7 +164,7 @@ def web_order_detail(order_id: int):
     <div class="card">
       <h2>Order</h2>
       <table><tbody id="orderRows"></tbody></table>
-      <div class="hint">Editable here: <b>Notes</b></div>
+      <div class="hint">Editable here: <b>Asset Type</b> (draft only), <b>Notes</b></div>
     </div>
 
     <div class="card">
@@ -216,12 +216,14 @@ def web_order_detail(order_id: int):
       var copyBtn = document.getElementById("copyParentBtn");
 
       // Editable inputs
+      var assetTypeSelect = null;
       var notesInput = null;
       var clientNameInput = null;
       var clientCompanyInput = null;
 
       // Track last-loaded values so we can enable Save only when dirty
       var baseline = {{
+        asset_type: "",
         notes: "",
         client_name: "",
         client_company_name: ""
@@ -295,6 +297,34 @@ def web_order_detail(order_id: int):
         tbody.appendChild(tr);
 
         return input;
+      }}
+
+      function addSelectRow(tbody, label, id, options) {{
+        var tr = document.createElement("tr");
+
+        var th = document.createElement("th");
+        th.textContent = label;
+
+        var td = document.createElement("td");
+
+        var sel = document.createElement("select");
+        sel.id = id;
+        sel.className = "editbox";
+
+        // Populate options
+        for (var i = 0; i < options.length; i++) {{
+          var opt = document.createElement("option");
+          opt.value = options[i];
+          opt.textContent = options[i];
+          sel.appendChild(opt);
+        }}
+
+        td.appendChild(sel);
+        tr.appendChild(th);
+        tr.appendChild(td);
+        tbody.appendChild(tr);
+
+        return sel;
       }}
 
       function renderSection(tbody, data, fields) {{
@@ -388,6 +418,7 @@ def web_order_detail(order_id: int):
 
       function getDraft() {{
         return {{
+          asset_type: normalize(assetTypeSelect ? assetTypeSelect.value : ""),
           notes: normalize(notesInput ? notesInput.value : ""),
           client_name: normalize(clientNameInput ? clientNameInput.value : ""),
           client_company_name: normalize(clientCompanyInput ? clientCompanyInput.value : "")
@@ -395,6 +426,7 @@ def web_order_detail(order_id: int):
       }}
 
       function setDraftFromBaseline() {{
+        if (assetTypeSelect) assetTypeSelect.value = baseline.asset_type;
         if (notesInput) notesInput.value = baseline.notes;
         if (clientNameInput) clientNameInput.value = baseline.client_name;
         if (clientCompanyInput) clientCompanyInput.value = baseline.client_company_name;
@@ -403,6 +435,7 @@ def web_order_detail(order_id: int):
       function isDirty() {{
         var d = getDraft();
         return (
+          d.asset_type !== baseline.asset_type ||
           d.notes !== baseline.notes ||
           d.client_name !== baseline.client_name ||
           d.client_company_name !== baseline.client_company_name
@@ -442,6 +475,11 @@ def web_order_detail(order_id: int):
           client_name: d.client_name,
           client_company_name: d.client_company_name
         }};
+
+        // Only send asset_type when it actually changed (avoids 400s on finalized orders).
+        if (d.asset_type !== baseline.asset_type) {{
+          payload.asset_type = d.asset_type;
+        }}
 
         fetch("/orders/" + ORDER_ID, {{
           method: "PATCH",
@@ -595,7 +633,16 @@ def web_order_detail(order_id: int):
             orderRows.innerHTML = "";
             addRow(orderRows, "ID", data.id);
             addRow(orderRows, "Artist", data.artist);
-            addRow(orderRows, "Asset Type", data.asset_type);
+            // Asset Type (editable only when draft)
+            var at = normalize(data.asset_type).toLowerCase();
+            var assetOptions = ["radio", "video", "art", "longform", "other"];
+            // Ensure current value is present even if it's not in our known list.
+            if (at && assetOptions.indexOf(at) === -1) {{
+              assetOptions.unshift(at);
+            }}
+            assetTypeSelect = addSelectRow(orderRows, "Asset Type", "editAssetType", assetOptions);
+            assetTypeSelect.value = at || "";
+
             addRow(orderRows, "Status", data.status);
 
             notesInput = addInputRow(orderRows, "Notes", "editNotes", "textarea");
@@ -641,6 +688,7 @@ def web_order_detail(order_id: int):
 
             // Baseline values
             baseline = {{
+              asset_type: normalize(data.asset_type).toLowerCase(),
               notes: normalize(data.notes),
               client_name: normalize(data.client_name),
               client_company_name: normalize(data.client_company_name)
@@ -652,6 +700,7 @@ def web_order_detail(order_id: int):
               okEl.textContent = "";
               refreshDirtyUI();
             }}
+            if (assetTypeSelect) assetTypeSelect.addEventListener("change", onChange);
             notesInput.addEventListener("input", onChange);
             clientNameInput.addEventListener("input", onChange);
             clientCompanyInput.addEventListener("input", onChange);
@@ -659,6 +708,16 @@ def web_order_detail(order_id: int):
             // Enable action buttons once we know the order exists
             reviseBtn.disabled = false;
             addlBtn.disabled = false;
+
+            // Asset Type editable only when draft
+            var isDraft = false;
+            if (data && data.status) {{
+              var ds = String(data.status).toLowerCase();
+              if (ds.indexOf("draft") >= 0) isDraft = true;
+            }}
+            if (assetTypeSelect) {{
+              assetTypeSelect.disabled = !isDraft;
+            }}
 
             // Finalize/Unfinalize: best-effort based on finalized_at or status text
             var isFinal = false;

@@ -762,35 +762,37 @@ def update_order(
 
     before = _order_snapshot(order)
 
-    # asset_type is normally immutable.
-    # EXCEPTION: draft "additional version" orders may change asset_type (e.g., radio -> video),
-    # while still linking back to the original via additional_version_of.
+    # Track which fields were updated (for audit).
+    touched_fields: list[str] = []
+
+    # asset_type:
+    # - Allowed for draft orders (common real-world fix: user picked wrong type)
+    # - Allowed for finalized orders ONLY when override=true
+    # - Always keep SP.order_type (and Order.order_type if present) in sync
     if payload.asset_type is not None and payload.asset_type != order.asset_type:
         new_asset = (payload.asset_type or "").strip().lower()
         if new_asset not in {"radio", "video", "art"}:
             raise HTTPException(status_code=400, detail="asset_type must be one of: radio, video, art")
 
         is_finalized = (order.status or "draft") == "finalized"
-        is_addl = False
-        try:
-            is_addl = bool(getattr(getattr(order, "sp", None), "additional_version_of", None))
-        except Exception:
-            is_addl = False
-
-        if is_finalized or not is_addl:
+        if is_finalized and not override:
             raise HTTPException(status_code=400, detail="asset_type cannot be changed")
 
         order.asset_type = new_asset
+        touched_fields.append("asset_type")
+
         # Keep SP order_type in sync if present
         if getattr(order, "sp", None) is not None:
             try:
                 order.sp.order_type = new_asset
             except Exception:
                 pass
+
         # Some builds also store order_type on the order row
         if hasattr(order, "order_type"):
             try:
                 order.order_type = new_asset
+                touched_fields.append("order_type")
             except Exception:
                 pass
 
@@ -799,7 +801,6 @@ def update_order(
         raise HTTPException(status_code=400, detail="order is finalized; use override=true to edit")
 
     # Apply allowed field updates (only if provided)
-    touched_fields: list[str] = []
     for field in [
         "artist",
         "rep_name",

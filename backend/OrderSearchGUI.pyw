@@ -378,7 +378,7 @@ class OrderDetailsWindow(tk.Toplevel):
             ttk.Label(body, text=label).grid(row=row, column=col, sticky="w", pady=(0, 4))
             v = tk.StringVar(value="")
             if label == "Asset Type":
-                e = ttk.Combobox(body, textvariable=v, values=ASSET_TYPES, width=width, state="disabled")
+                e = ttk.Combobox(body, textvariable=v, values=ASSET_TYPES, width=width, state="readonly")
             else:
                 e = ttk.Entry(body, textvariable=v, width=width)
 
@@ -441,9 +441,9 @@ class OrderDetailsWindow(tk.Toplevel):
                 ent.configure(state="readonly")
                 continue
 
-            # Asset Type is normally read-only, EXCEPT for draft additional-version orders
+            # Asset Type is editable while the order is editable (draft / override edit)
             if label == "Asset Type":
-                ent.configure(state=("readonly" if (editable and self._asset_type_editable) else "disabled"))
+                ent.configure(state=("readonly" if editable else "disabled"))
                 continue
 
             if label == "Rep":
@@ -523,8 +523,8 @@ class OrderDetailsWindow(tk.Toplevel):
             is_addl = False
 
         editable = (status != "finalized") or self._override_mode
-        # Asset Type can only be edited on *additional versions* (draft), per workflow.
-        self._asset_type_editable = bool(editable and is_addl and status != "finalized")
+        # Asset Type is editable on draft orders (and when Override Edit is active).
+        self._asset_type_editable = bool(editable)
         self._set_entry_state(editable)
 
         # Buttons states
@@ -683,15 +683,12 @@ class OrderDetailsWindow(tk.Toplevel):
             "client_company_name": self.vars["Client Company"][0].get().strip() or None,
             "rep_name": (self.vars.get("Rep", (tk.StringVar(value=REP_FULL[0]), None))[0].get() or REP_FULL[0]).strip(),
         }
-        # Asset Type is normally immutable. We only allow editing it for *additional versions*.
-        if getattr(self, "_asset_type_editable", False):
-            at = (self.vars["Asset Type"][0].get() or "").strip().lower()
-            if at:
-                if at not in ("radio", "video", "art"):
-                    messagebox.showerror("Bad asset type", "Asset Type must be: radio, video, or art.")
-                    return
-                payload["asset_type"] = at
-
+        # Asset Type is editable while the order is editable (draft / override edit).
+        at = (self.vars["Asset Type"][0].get() or "").strip().lower()
+        if at not in ("radio", "video", "art"):
+            messagebox.showerror("Bad asset type", "Asset Type must be: radio, video, or art.")
+            return
+        payload["asset_type"] = at
 
         self.save_btn.configure(state="disabled")
         self.status_var.set("Saving…")
