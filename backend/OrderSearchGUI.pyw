@@ -592,10 +592,36 @@ class OrderDetailsWindow(tk.Toplevel):
     def on_finalize(self):
         if not self.order_data:
             return
+
         status = (self.order_data.get("status") or "").strip().lower()
         if status == "finalized":
             return
-        FinalizeDialog(self, self.order_id)
+
+        ok = messagebox.askokcancel(
+            "Finalize order",
+            f"Finalize order {self.order_id}?\n\nRadio/Video will auto-create/link Trello (no more pasting IDs).",
+            icon="question",
+            parent=self,
+        )
+        if not ok:
+            return
+
+        # Disable immediately to prevent double-clicks
+        self.finalize_btn.configure(state="disabled")
+
+        def worker():
+            try:
+                http_post_json(f"{API_BASE}/orders/{self.order_id}/finalize", payload=None, timeout=40)
+                self.after(0, self.refresh)
+            except HTTPError as e:
+                msg = _http_error_to_message(e)
+                self.after(0, lambda: messagebox.showerror("Finalize failed", msg, parent=self))
+                self.after(0, lambda: self.finalize_btn.configure(state="normal"))
+            except Exception as e:
+                self.after(0, lambda: messagebox.showerror("Finalize failed", str(e), parent=self))
+                self.after(0, lambda: self.finalize_btn.configure(state="normal"))
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def on_override_edit(self):
         if not self.order_data:

@@ -8,7 +8,19 @@ from __future__ import annotations
 
 import json
 import os
-from app.core.config import ensure_env_loaded
+from pathlib import Path
+
+# Prefer the app's env-loader if present, but ALSO load .env ourselves with an explicit path
+# so Trello auth never depends on the process working-directory.
+try:
+    from app.core.config import ensure_env_loaded as _ensure_env_loaded  # type: ignore
+except Exception:  # pragma: no cover
+    _ensure_env_loaded = None
+
+try:
+    from dotenv import load_dotenv  # type: ignore
+except Exception:  # pragma: no cover
+    load_dotenv = None
 
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
@@ -22,12 +34,84 @@ class TrelloConfigError(RuntimeError):
     pass
 
 
+def _backend_root() -> Path:
+    # File lives at: backend/app/services/trello_service.py -> parents[2] == backend
+    return Path(__file__).resolve().parents[2]
+
+
+def _load_env_strict() -> None:
+    """Load backend/.env with an explicit path.
+
+    Why: depending on process CWD or import-order to load env vars is brittle.
+    We prefer python-dotenv if available, but we ALSO support a tiny manual
+    parser so Trello credentials always load on Windows even if python-dotenv
+    isn't installed.
+
+    Rules:
+    - Never clobber non-empty env vars already set in the process.
+    - If the env var is missing OR blank, allow .env to fill it.
+    """
+    env_path = _backend_root() / ".env"
+    if not env_path.exists():
+        return
+
+    # 1) Try python-dotenv (nice-to-have)
+    if load_dotenv is not None:
+        try:
+            load_dotenv(dotenv_path=str(env_path), override=False)
+        except Exception:
+            # fall back to manual parsing below
+            pass
+
+    # 2) Manual parsing (works even without python-dotenv)
+    try:
+        for raw in env_path.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            k = k.strip().lstrip('\ufeff')  # handle UTF-8 BOM
+            v = v.strip()
+
+            # strip surrounding quotes if present
+            if len(v) >= 2 and ((v[0] == v[-1] == '"') or (v[0] == v[-1] == "'")):
+                v = v[1:-1]
+
+            if not k:
+                continue
+
+            # Only set if missing or blank
+            cur = os.environ.get(k, "")
+            if cur.strip() == "":
+                os.environ[k] = v
+    except Exception:
+        # If env parsing fails, don't crash import; caller will raise a config error.
+        return
+
+
 def _trello_auth_params() -> dict:
-    ensure_env_loaded()
+    # Try the project's loader first (if any), then hard-load the known backend/.env path.
+    if _ensure_env_loaded is not None:
+        try:
+            _ensure_env_loaded()
+        except Exception:
+            # Don't let a brittle loader break Trello; we'll try strict loading next.
+            pass
+
+    _load_env_strict()
+
     key = os.environ.get("TRELLO_KEY", "").strip()
     token = os.environ.get("TRELLO_TOKEN", "").strip()
     if not key or not token:
-        raise TrelloConfigError("Missing Trello credentials. Set TRELLO_KEY and TRELLO_TOKEN env vars.")
+        env_path = _backend_root() / ".env"
+        # Keep the original message so existing callers/tests don't get surprised,
+        # but add one useful breadcrumb for debugging.
+        raise TrelloConfigError(
+            "Missing Trello credentials. Set TRELLO_KEY and TRELLO_TOKEN env vars. "
+            f"(Checked: {env_path})"
+        )
     return {"key": key, "token": token}
 
 
@@ -44,7 +128,6 @@ def _http_json(method: str, url: str, payload: dict | None = None, timeout: int 
         return json.loads(raw) if raw else {}
 
 
-
 def card_exists(card_id: str) -> bool:
     """Return True if the Trello card id is accessible with current key/token."""
     cid = (card_id or "").strip()
@@ -59,6 +142,7 @@ def card_exists(card_id: str) -> bool:
         if getattr(e, "code", None) == 404:
             return False
         raise
+
 
 def _delete_checklist(checklist_id: str) -> None:
     auth = _trello_auth_params()
@@ -167,7 +251,6 @@ def ensure_sp_checklist(*, card_id: str, sp_number: str, notes: str | None) -> s
         raise RuntimeError("SP number is required to create the Trello checklist name.")
     items = _notes_to_items(notes)
     return create_checklist_on_card(card_id=card_id, name=name, items=items)
-
 
 
 def rebuild_order_checklist(*, card_id: str, old_checklist_id: str, checklist_name: str, notes: str | None) -> str:
