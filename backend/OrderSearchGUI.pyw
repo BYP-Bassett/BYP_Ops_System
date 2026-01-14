@@ -9,13 +9,15 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 import os
 import threading
 import tkinter as tk
+import http.cookiejar
 from tkinter import ttk, messagebox, simpledialog
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
-from urllib.request import Request, urlopen
+from urllib.request import Request, urlopen, build_opener, HTTPCookieProcessor
 
 API_BASE = "http://127.0.0.1:8000"
 ASSET_TYPES = ["radio", "video", "art"]
@@ -59,6 +61,30 @@ def _prefs_path() -> str:
 # -----------------------------
 # HTTP helpers
 # -----------------------------
+# Session-cookie support (desktop auth)
+def _cookie_file_path() -> str:
+    # Persist cookies next to the prefs file if possible; otherwise next to this script.
+    try:
+        prefs_path = Path(PREFS_PATH) if 'PREFS_PATH' in globals() else None
+        base = prefs_path.parent if prefs_path else Path(__file__).resolve().parent
+    except Exception:
+        base = Path(__file__).resolve().parent
+    return str(base / 'OrderSearchGUI_session_cookies.lwp')
+
+COOKIE_FILE_PATH = _cookie_file_path()
+_COOKIE_JAR = http.cookiejar.LWPCookieJar(COOKIE_FILE_PATH)
+try:
+    _COOKIE_JAR.load(ignore_discard=True, ignore_expires=True)
+except Exception:
+    pass
+_OPENER = build_opener(HTTPCookieProcessor(_COOKIE_JAR))
+
+def _save_cookies():
+    try:
+        _COOKIE_JAR.save(ignore_discard=True, ignore_expires=True)
+    except Exception:
+        pass
+
 def _read_json_response(resp):
     raw = resp.read().decode("utf-8", errors="replace")
     return json.loads(raw) if raw else {}
@@ -66,8 +92,10 @@ def _read_json_response(resp):
 
 def http_get_json(url: str, timeout: int = 10) -> dict:
     req = Request(url, headers={"Accept": "application/json"})
-    with urlopen(req, timeout=timeout) as resp:
-        return _read_json_response(resp)
+    with _OPENER.open(req, timeout=timeout) as resp:
+        data = _read_json_response(resp)
+        _save_cookies()
+        return data
 
 
 def http_send_json(method: str, url: str, payload: dict | None, timeout: int = 15) -> dict:
@@ -77,8 +105,10 @@ def http_send_json(method: str, url: str, payload: dict | None, timeout: int = 1
         data = json.dumps(payload).encode("utf-8")
         headers["Content-Type"] = "application/json"
     req = Request(url, data=data, headers=headers, method=method)
-    with urlopen(req, timeout=timeout) as resp:
-        return _read_json_response(resp)
+    with _OPENER.open(req, timeout=timeout) as resp:
+        data = _read_json_response(resp)
+        _save_cookies()
+        return data
 
 
 def http_post_json(url: str, payload: dict | None = None, timeout: int = 15) -> dict:
@@ -93,9 +123,95 @@ def http_delete_json(url: str, timeout: int = 15) -> dict:
     return http_send_json("DELETE", url, payload=None, timeout=timeout)
 
 
+
+def http_post_form(url: str, form: dict, timeout: int = 15) -> dict:
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/x-www-form-urlencoded",
+    }
+    data = urlencode(form).encode("utf-8")
+    req = Request(url, data=data, headers=headers, method="POST")
+    with _OPENER.open(req, timeout=timeout) as resp:
+        # login route may redirect or return html; attempt json but tolerate non-json
+        try:
+            data = _read_json_response(resp)
+            _save_cookies()
+            return data
+        except Exception:
+            _save_cookies()
+            return {}
+
+
+def api_me(timeout: int = 10) -> dict:
+    try:
+        return http_get_json(f"{API_BASE}/me", timeout=timeout)
+    except Exception:
+        return {}
+
+
+def api_login(username: str, password: str, timeout: int = 15) -> bool:
+    # POST /login (form) and then verify via /me
+    http_post_form(f"{API_BASE}/login", {"username": username, "password": password}, timeout=timeout)
+    me = api_me(timeout=timeout)
+    return bool(me.get("authenticated"))
+
+
 # -----------------------------
 # Dialogs
 # -----------------------------
+class LoginDialog(tk.Toplevel):
+    def __init__(self, parent, prefill_username: str = ""):
+        super().__init__(parent)
+        self.parent = parent
+        self.result = None  # (username, password) or None
+
+        self.title("Login")
+        self.geometry("380x170")
+        self.resizable(False, False)
+        self.transient(parent)
+        self.grab_set()
+
+        frm = ttk.Frame(self)
+        frm.pack(fill="both", expand=True, padx=12, pady=12)
+
+        ttk.Label(frm, text="Username").grid(row=0, column=0, sticky="w")
+        self.user_var = tk.StringVar(value=prefill_username or "")
+        user_ent = ttk.Entry(frm, textvariable=self.user_var, width=28)
+        user_ent.grid(row=0, column=1, sticky="w")
+
+        ttk.Label(frm, text="Password").grid(row=1, column=0, sticky="w", pady=(10, 0))
+        self.pass_var = tk.StringVar(value="")
+        pass_ent = ttk.Entry(frm, textvariable=self.pass_var, width=28, show="*")
+        pass_ent.grid(row=1, column=1, sticky="w", pady=(10, 0))
+
+        self.status_var = tk.StringVar(value="")
+        ttk.Label(frm, textvariable=self.status_var).grid(row=2, column=0, columnspan=2, sticky="w", pady=(10, 0))
+
+        btns = ttk.Frame(self)
+        btns.pack(fill="x", padx=12, pady=(0, 12))
+        self.ok_btn = ttk.Button(btns, text="Login", command=self.on_ok)
+        self.ok_btn.pack(side="left")
+        ttk.Button(btns, text="Cancel", command=self.on_cancel).pack(side="left", padx=(10, 0))
+
+        self.bind("<Return>", lambda _e: self.on_ok())
+        self.bind("<Escape>", lambda _e: self.on_cancel())
+
+        self.after(50, lambda: user_ent.focus_set())
+
+    def on_ok(self):
+        u = (self.user_var.get() or "").strip()
+        p = (self.pass_var.get() or "").strip()
+        if not u or not p:
+            self.status_var.set("Username + password required.")
+            return
+        self.result = (u, p)
+        self.destroy()
+
+    def on_cancel(self):
+        self.result = None
+        self.destroy()
+
+
 class FinalizeDialog(tk.Toplevel):
     def __init__(self, parent, order_id: int):
         super().__init__(parent)
@@ -263,18 +379,30 @@ class NewOrderDialog(tk.Toplevel):
         self.create_btn.configure(state="disabled")
         self.status_var.set("Creating…")
 
-        def worker():
-            try:
-                created = http_post_json(f"{API_BASE}/orders/new", payload=payload, timeout=20)
-                self.after(0, lambda: self._done(created))
-            except HTTPError as e:
-                self.after(0, lambda: self._fail(_http_error_to_message(e)))
-            except URLError as e:
-                self.after(0, lambda: self._fail(f"Connection error: {e}"))
-            except Exception as e:
-                self.after(0, lambda: self._fail(str(e)))
+        def api_fn():
+            return http_post_json(f"{API_BASE}/orders/new", payload=payload, timeout=20)
 
-        threading.Thread(target=worker, daemon=True).start()
+        def on_ok(created):
+            self._done(created)
+
+        def on_fail(msg):
+            self._fail(msg)
+
+        # Ask for login only if the server demands it (401)
+        if hasattr(self.parent, "_call_api_with_auth"):
+            self.parent._call_api_with_auth(self, api_fn, on_ok, on_fail)
+        else:
+            def worker():
+                try:
+                    created = api_fn()
+                    self.after(0, lambda: on_ok(created))
+                except HTTPError as e:
+                    self.after(0, lambda: on_fail(_http_error_to_message(e)))
+                except URLError as e:
+                    self.after(0, lambda: on_fail(f"Connection error: {e}"))
+                except Exception as e:
+                    self.after(0, lambda: on_fail(str(e)))
+            threading.Thread(target=worker, daemon=True).start()
 
     def _done(self, created: dict):
         self.create_btn.configure(state="normal")
@@ -540,16 +668,27 @@ class OrderDetailsWindow(tk.Toplevel):
         if not self.order_data:
             return
 
-        def worker():
-            try:
-                created = http_post_json(f"{API_BASE}/orders/{self.order_id}/addl_vers", payload=None, timeout=25)
-                self.after(0, lambda: self._open_new(created))
-            except HTTPError as e:
-                self.after(0, lambda: messagebox.showerror("Add'l version failed", _http_error_to_message(e)))
-            except Exception as e:
-                self.after(0, lambda: messagebox.showerror("Add'l version failed", str(e)))
+        def api_fn():
+            return http_post_json(f"{API_BASE}/orders/{self.order_id}/addl_vers", payload=None, timeout=25)
 
-        threading.Thread(target=worker, daemon=True).start()
+        def on_ok(created):
+            self._open_new(created)
+
+        def on_fail(msg):
+            messagebox.showerror("Add'l version failed", msg)
+
+        if hasattr(self.parent, "_call_api_with_auth"):
+            self.parent._call_api_with_auth(self, api_fn, on_ok, on_fail)
+        else:
+            def worker():
+                try:
+                    created = api_fn()
+                    self.after(0, lambda: on_ok(created))
+                except HTTPError as e:
+                    self.after(0, lambda: on_fail(_http_error_to_message(e)))
+                except Exception as e:
+                    self.after(0, lambda: on_fail(str(e)))
+            threading.Thread(target=worker, daemon=True).start()
 
     
 
@@ -557,30 +696,52 @@ class OrderDetailsWindow(tk.Toplevel):
         if not self.order_data:
             return
 
-        def worker():
-            try:
-                created = http_post_json(f"{API_BASE}/orders/{self.order_id}/duplicate", payload=None, timeout=25)
-                self.after(0, lambda: self._open_new(created))
-            except HTTPError as e:
-                self.after(0, lambda: messagebox.showerror("Duplicate failed", _http_error_to_message(e)))
-            except Exception as e:
-                self.after(0, lambda: messagebox.showerror("Duplicate failed", str(e)))
+        def api_fn():
+            return http_post_json(f"{API_BASE}/orders/{self.order_id}/duplicate", payload=None, timeout=25)
 
-        threading.Thread(target=worker, daemon=True).start()
+        def on_ok(created):
+            self._open_new(created)
+
+        def on_fail(msg):
+            messagebox.showerror("Duplicate failed", msg)
+
+        if hasattr(self.parent, "_call_api_with_auth"):
+            self.parent._call_api_with_auth(self, api_fn, on_ok, on_fail)
+        else:
+            def worker():
+                try:
+                    created = api_fn()
+                    self.after(0, lambda: on_ok(created))
+                except HTTPError as e:
+                    self.after(0, lambda: on_fail(_http_error_to_message(e)))
+                except Exception as e:
+                    self.after(0, lambda: on_fail(str(e)))
+            threading.Thread(target=worker, daemon=True).start()
     def on_revision_of(self):
         if not self.order_data:
             return
 
-        def worker():
-            try:
-                created = http_post_json(f"{API_BASE}/orders/{self.order_id}/revise", payload=None, timeout=25)
-                self.after(0, lambda: self._open_new(created))
-            except HTTPError as e:
-                self.after(0, lambda: messagebox.showerror("Revision failed", _http_error_to_message(e)))
-            except Exception as e:
-                self.after(0, lambda: messagebox.showerror("Revision failed", str(e)))
+        def api_fn():
+            return http_post_json(f"{API_BASE}/orders/{self.order_id}/revise", payload=None, timeout=25)
 
-        threading.Thread(target=worker, daemon=True).start()
+        def on_ok(created):
+            self._open_new(created)
+
+        def on_fail(msg):
+            messagebox.showerror("Revision failed", msg)
+
+        if hasattr(self.parent, "_call_api_with_auth"):
+            self.parent._call_api_with_auth(self, api_fn, on_ok, on_fail)
+        else:
+            def worker():
+                try:
+                    created = api_fn()
+                    self.after(0, lambda: on_ok(created))
+                except HTTPError as e:
+                    self.after(0, lambda: on_fail(_http_error_to_message(e)))
+                except Exception as e:
+                    self.after(0, lambda: on_fail(str(e)))
+            threading.Thread(target=worker, daemon=True).start()
 
     def _open_new(self, created: dict):
         new_id = created.get("id")
@@ -609,19 +770,28 @@ class OrderDetailsWindow(tk.Toplevel):
         # Disable immediately to prevent double-clicks
         self.finalize_btn.configure(state="disabled")
 
-        def worker():
-            try:
-                http_post_json(f"{API_BASE}/orders/{self.order_id}/finalize", payload=None, timeout=40)
-                self.after(0, self.refresh)
-            except HTTPError as e:
-                msg = _http_error_to_message(e)
-                self.after(0, lambda: messagebox.showerror("Finalize failed", msg, parent=self))
-                self.after(0, lambda: self.finalize_btn.configure(state="normal"))
-            except Exception as e:
-                self.after(0, lambda: messagebox.showerror("Finalize failed", str(e), parent=self))
-                self.after(0, lambda: self.finalize_btn.configure(state="normal"))
+        def api_fn():
+            return http_post_json(f"{API_BASE}/orders/{self.order_id}/finalize", payload=None, timeout=40)
 
-        threading.Thread(target=worker, daemon=True).start()
+        def on_ok(_res):
+            self.refresh()
+
+        def on_fail(msg):
+            messagebox.showerror("Finalize failed", msg, parent=self)
+            self.finalize_btn.configure(state="normal")
+
+        if hasattr(self.parent, "_call_api_with_auth"):
+            self.parent._call_api_with_auth(self, api_fn, on_ok, on_fail)
+        else:
+            def worker():
+                try:
+                    api_fn()
+                    self.after(0, on_ok)
+                except HTTPError as e:
+                    self.after(0, lambda: on_fail(_http_error_to_message(e)))
+                except Exception as e:
+                    self.after(0, lambda: on_fail(str(e)))
+            threading.Thread(target=worker, daemon=True).start()
 
     def on_override_edit(self):
         if not self.order_data:
@@ -642,16 +812,27 @@ class OrderDetailsWindow(tk.Toplevel):
         self.save_btn.configure(state="disabled")
         self.status_var.set("Reopening…")
 
-        def worker():
-            try:
-                reopened = http_post_json(f"{API_BASE}/orders/{self.order_id}/unfinalize", payload=None, timeout=25)
-                self.after(0, lambda: self._after_unfinalize(reopened))
-            except HTTPError as e:
-                self.after(0, lambda: self._after_unfinalize_fail(_http_error_to_message(e)))
-            except Exception as e:
-                self.after(0, lambda: self._after_unfinalize_fail(str(e)))
+        def api_fn():
+            return http_post_json(f"{API_BASE}/orders/{self.order_id}/unfinalize", payload=None, timeout=25)
 
-        threading.Thread(target=worker, daemon=True).start()
+        def on_ok(reopened):
+            self._after_unfinalize(reopened)
+
+        def on_fail(msg):
+            self._after_unfinalize_fail(msg)
+
+        if hasattr(self.parent, "_call_api_with_auth"):
+            self.parent._call_api_with_auth(self, api_fn, on_ok, on_fail)
+        else:
+            def worker():
+                try:
+                    reopened = api_fn()
+                    self.after(0, lambda: on_ok(reopened))
+                except HTTPError as e:
+                    self.after(0, lambda: on_fail(_http_error_to_message(e)))
+                except Exception as e:
+                    self.after(0, lambda: on_fail(str(e)))
+            threading.Thread(target=worker, daemon=True).start()
 
     def _after_unfinalize(self, reopened: dict):
         self._override_mode = False
@@ -693,16 +874,27 @@ class OrderDetailsWindow(tk.Toplevel):
         self.save_btn.configure(state="disabled")
         self.status_var.set("Saving…")
 
-        def worker():
-            try:
-                updated = http_patch_json(f"{API_BASE}/orders/{self.order_id}", payload=payload, timeout=30)
-                self.after(0, lambda: self._after_save(updated))
-            except HTTPError as e:
-                self.after(0, lambda: self._after_save_fail(_http_error_to_message(e)))
-            except Exception as e:
-                self.after(0, lambda: self._after_save_fail(str(e)))
+        def api_fn():
+            return http_patch_json(f"{API_BASE}/orders/{self.order_id}", payload=payload, timeout=30)
 
-        threading.Thread(target=worker, daemon=True).start()
+        def on_ok(updated):
+            self._after_save(updated)
+
+        def on_fail(msg):
+            self._after_save_fail(msg)
+
+        if hasattr(self.parent, "_call_api_with_auth"):
+            self.parent._call_api_with_auth(self, api_fn, on_ok, on_fail)
+        else:
+            def worker():
+                try:
+                    updated = api_fn()
+                    self.after(0, lambda: on_ok(updated))
+                except HTTPError as e:
+                    self.after(0, lambda: on_fail(_http_error_to_message(e)))
+                except Exception as e:
+                    self.after(0, lambda: on_fail(str(e)))
+            threading.Thread(target=worker, daemon=True).start()
 
     def _after_save(self, updated: dict):
         self.save_btn.configure(state="normal")
@@ -763,16 +955,27 @@ class OrderDetailsWindow(tk.Toplevel):
         self.delete_btn.configure(state="disabled")
         self.status_var.set("Deleting…")
 
-        def worker():
-            try:
-                http_delete_json(f"{API_BASE}/orders/{self.order_id}?{urlencode(qs)}", timeout=25)
-                self.after(0, self._after_delete_ok)
-            except HTTPError as e:
-                self.after(0, lambda: self._after_delete_fail(_http_error_to_message(e)))
-            except Exception as e:
-                self.after(0, lambda: self._after_delete_fail(str(e)))
+        def api_fn():
+            return http_delete_json(f"{API_BASE}/orders/{self.order_id}?{urlencode(qs)}", timeout=25)
 
-        threading.Thread(target=worker, daemon=True).start()
+        def on_ok(_res):
+            self._after_delete_ok()
+
+        def on_fail(msg):
+            self._after_delete_fail(msg)
+
+        if hasattr(self.parent, "_call_api_with_auth"):
+            self.parent._call_api_with_auth(self, api_fn, on_ok, on_fail)
+        else:
+            def worker():
+                try:
+                    api_fn()
+                    self.after(0, on_ok)
+                except HTTPError as e:
+                    self.after(0, lambda: on_fail(_http_error_to_message(e)))
+                except Exception as e:
+                    self.after(0, lambda: on_fail(str(e)))
+            threading.Thread(target=worker, daemon=True).start()
 
     def _after_delete_ok(self):
         if hasattr(self.parent, "run_search"):
@@ -838,7 +1041,102 @@ class OrderSearchGUI(tk.Tk):
 
         # On launch, show all orders immediately.
         # (Search endpoint with no filters returns everything.)
-        self.after(150, self.run_search)
+        # Require login before showing any orders (confidential)
+        self.after(50, self._startup_login)
+
+
+
+    # -----------------------------
+    # Auth (desktop)
+    # -----------------------------
+    def ensure_login(self, parent_window=None, force: bool = False) -> bool:
+        """Ensure we have a valid session cookie. Prompts for credentials if needed."""
+        try:
+            if not force:
+                me = api_me(timeout=8)
+                if isinstance(me, dict) and me.get("authenticated"):
+                    return True
+        except Exception:
+            pass
+
+        # Prefill last username if available
+        prefs = dict(getattr(self, "_prefs", {}) or {})
+        last_user = (prefs.get("last_username") or "").strip()
+
+        dlg = LoginDialog(parent_window or self, prefill_username=last_user)
+        self.wait_window(dlg)
+        if not getattr(dlg, "result", None):
+            return False
+
+        username, password = dlg.result
+        try:
+            ok = api_login(username, password, timeout=15)
+        except HTTPError as e:
+            messagebox.showerror("Login failed", _http_error_to_message(e), parent=parent_window or self)
+            return False
+        except Exception as e:
+            messagebox.showerror("Login failed", str(e), parent=parent_window or self)
+            return False
+
+        if not ok:
+            messagebox.showerror("Login failed", "Bad username/password (or server didn't set session).", parent=parent_window or self)
+            return False
+
+        # Persist last username
+        try:
+            prefs["last_username"] = (username or "").strip().lower()
+            self._prefs = prefs
+            self._save_prefs(prefs)
+        except Exception:
+            pass
+
+        return True
+
+
+    def _startup_login(self):
+        # Block initial search until the user authenticates.
+        self.msg_var.set("Login required.")
+        ok = self.ensure_login(parent_window=self, force=False)
+        if not ok:
+            # User cancelled login; close app so no data is shown.
+            try:
+                self.destroy()
+            except Exception:
+                pass
+            return
+        # Now safe to load orders.
+        try:
+            self.run_search(silent=True)
+        except Exception:
+            # fall back to the normal search path
+            try:
+                self.run_search()
+            except Exception:
+                pass
+
+
+    def _call_api_with_auth(self, parent_window, api_fn, on_ok, on_fail, retry: bool = True):
+        """Run api_fn() in a worker thread. If 401, prompt login and retry once."""
+        def worker():
+            try:
+                res = api_fn()
+                self.after(0, lambda: on_ok(res))
+            except HTTPError as e:
+                if getattr(e, "code", None) == 401 and retry:
+                    # Must prompt on UI thread
+                    def do_login_then_retry():
+                        ok = self.ensure_login(parent_window=parent_window, force=True)
+                        if not ok:
+                            on_fail("Not authenticated")
+                            return
+                        self._call_api_with_auth(parent_window, api_fn, on_ok, on_fail, retry=False)
+                    self.after(0, do_login_then_retry)
+                else:
+                    self.after(0, lambda: on_fail(_http_error_to_message(e)))
+            except Exception as e:
+                self.after(0, lambda: on_fail(str(e)))
+
+        threading.Thread(target=worker, daemon=True).start()
 
 
     # -----------------------------
@@ -980,6 +1278,9 @@ class OrderSearchGUI(tk.Tk):
 
         self.msg_var = tk.StringVar(value="")
         ttk.Label(btns_right, textvariable=self.msg_var).pack(side="right")
+
+        self.delete_btn = ttk.Button(btns_right, text="Delete", command=self._ctx_delete)
+        self.delete_btn.pack(side="right", padx=(0, 10))
 
         self.show_id_btn = ttk.Button(btns_right, text="Show Order ID", command=self.enable_order_id_column)
         self.show_id_btn.pack(side="right", padx=(0, 10))
@@ -1127,6 +1428,18 @@ class OrderSearchGUI(tk.Tk):
 
 
     def run_search(self, silent: bool = False):
+        # Confidential: require login before any order data is fetched
+        try:
+            me = api_me(timeout=8)
+            if not (isinstance(me, dict) and me.get('authenticated')):
+                ok = self.ensure_login(parent_window=self, force=False)
+                if not ok:
+                    return
+        except Exception:
+            ok = self.ensure_login(parent_window=self, force=False)
+            if not ok:
+                return
+
         params = self._build_search_params()
         url = f"{API_BASE}/orders/search2"
         if params:
@@ -1342,14 +1655,17 @@ class OrderSearchGUI(tk.Tk):
         def worker():
             failures: list[tuple[int, str]] = []
 
+            # If server requires auth, prompt once then retry the whole batch.
             for oid in order_ids:
                 qs = {"initials": initials}
-                # Force only for finalized ones
                 if oid in finalized_ids:
                     qs["force"] = "true"
                 try:
                     http_delete_json(f"{API_BASE}/orders/{oid}?{urlencode(qs)}", timeout=25)
                 except HTTPError as e:
+                    if getattr(e, "code", None) == 401 and hasattr(self, "ensure_login"):
+                        self.after(0, lambda: self._ctx_delete_retry_after_login(order_ids, finalized_ids, initials))
+                        return
                     failures.append((oid, _http_error_to_message(e)))
                 except Exception as e:
                     failures.append((oid, str(e)))

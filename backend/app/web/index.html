@@ -37,6 +37,22 @@
 <body>
   <h1>BYP Ops — Orders Search</h1>
 
+  <div class="bar" style="margin-bottom: 14px;">
+    <button id="myDraftsBtn" type="button">My Drafts</button>
+    <button id="allBtn" type="button" title="Clear filters + show all">All</button>
+
+    <a id="adminLink" href="/admin/users" style="display:none; text-decoration:none;">
+      <button type="button">Admin Users</button>
+    </a>
+
+    <form method="post" action="/logout" style="margin:0;">
+      <button type="submit">Logout</button>
+    </form>
+
+    <span id="whoami" class="muted"></span>
+  </div>
+
+
   <div class="grid" id="filters">
     <div class="field">
       <label for="artist">Artist (contains)</label>
@@ -139,5 +155,87 @@
   </table>
 
   <script src="/web/app.js"></script>
+
+  <script>
+    (function () {
+      // This page requires login (server redirects), but we still grab /me to power "My Drafts".
+      var me = null;
+      var who = document.getElementById("whoami");
+      var adminLink = document.getElementById("adminLink");
+
+      function setText(el, txt) {
+        if (!el) return;
+        el.textContent = txt || "";
+      }
+
+      function getEl(id) { return document.getElementById(id); }
+
+      function clearFilters() {
+        var ids = ["artist","notes","client_name","client_company","sp_number"];
+        for (var i=0; i<ids.length; i++) {
+          var el = getEl(ids[i]);
+          if (el) el.value = "";
+        }
+        var selIds = ["asset_type","status","rep_code"];
+        for (var j=0; j<selIds.length; j++) {
+          var s = getEl(selIds[j]);
+          if (s) s.value = "";
+        }
+        var chk = getEl("include_deleted");
+        if (chk) chk.checked = false;
+      }
+
+      function click(id) {
+        var el = getEl(id);
+        if (el) el.click();
+      }
+
+      function applyMyDrafts() {
+        // Clear everything first
+        clearFilters();
+
+        // Force draft + current rep_code
+        var status = getEl("status");
+        if (status) status.value = "draft";
+
+        var rep = getEl("rep_code");
+        if (rep && me && me.rep_code) rep.value = String(me.rep_code).trim();
+
+        click("searchBtn");
+      }
+
+      function applyAll() {
+        clearFilters();
+        click("searchBtn");
+      }
+
+      // Wire buttons
+      var myBtn = getEl("myDraftsBtn");
+      if (myBtn) myBtn.addEventListener("click", applyMyDrafts);
+
+      var allBtn = getEl("allBtn");
+      if (allBtn) allBtn.addEventListener("click", applyAll);
+
+      // Fetch /me for UI + My Drafts
+      fetch("/me", { method: "GET" })
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+          me = data || null;
+          if (!me || !me.authenticated) {
+            // Shouldn't happen because server redirects, but just in case.
+            window.location.href = "/login";
+            return;
+          }
+          setText(who, "Logged in as: " + (me.rep_code || "") + " — " + (me.rep_name || me.username || ""));
+          if (String(me.role || "").toLowerCase() === "admin") {
+            if (adminLink) adminLink.style.display = "inline-block";
+          }
+        })
+        .catch(function () {
+          // Don't block the page if /me fails; My Drafts just won't auto-fill rep.
+          setText(who, "");
+        });
+    })();
+  </script>
 </body>
 </html>

@@ -5,7 +5,26 @@
   let offset = 0;
   let total = 0;
 
-  const $ = (id) => document.getElementById(id);
+  const $ = (id) => {
+    if (!id) return null;
+    let el = document.getElementById(id);
+    if (el) return el;
+
+    // Fallbacks if IDs ever change:
+    // - name="<id>"
+    // - data-id="<id>"
+    const esc = (window.CSS && CSS.escape)
+      ? CSS.escape(String(id))
+      : String(id).replace(/"/g, '\"');
+
+    el = document.querySelector(`[name="${esc}"]`);
+    if (el) return el;
+
+    el = document.querySelector(`[data-id="${esc}"]`);
+    if (el) return el;
+
+    return null;
+  };
 
   const els = {
     artist: $("artist"),
@@ -595,6 +614,119 @@ createBtn.addEventListener("click", create);
   } catch (_) {}
 
   runSearch(forceRefresh || !hadState);
+
+
+  // ---- My Drafts (web) helpers ----
+  // Expose a tiny API so index.html (or future pages) can call it without depending on element IDs.
+  // Shortcut keys:
+  //   Ctrl+Shift+K = My Drafts
+  //   Ctrl+Shift+L = All
+  window.BYPOps = window.BYPOps || {};
+
+  let _meCache = null;
+
+  async function fetchMe() {
+    if (_meCache) return _meCache;
+    try {
+      const r = await fetch("/me", { method: "GET" });
+      const j = await r.json();
+      _meCache = j;
+      return j;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function clearFilters() {
+    // Text inputs
+    const txtIds = ["artist", "notes", "client_name", "client_company", "sp_number"];
+    for (let i = 0; i < txtIds.length; i++) {
+      const el = $(txtIds[i]);
+      if (el) el.value = "";
+    }
+
+    // Selects (best-effort)
+    const selIds = ["asset_type", "status", "rep_code"];
+    for (let j = 0; j < selIds.length; j++) {
+      const s = $(selIds[j]);
+      if (s) s.value = "";
+    }
+
+    const chk = $("include_deleted");
+    if (chk) chk.checked = false;
+  }
+
+  async function applyMyDrafts() {
+    const me = await fetchMe();
+    if (!me || !me.authenticated) {
+      window.location.href = "/login";
+      return;
+    }
+
+    clearFilters();
+
+    const status = $("status");
+    if (status) status.value = "draft";
+
+    const rep = $("rep_code");
+    if (rep && me.rep_code) rep.value = String(me.rep_code).trim();
+
+    // Reuse existing search pipeline
+    try {
+      runSearch(true);
+    } catch (_) {
+      // Fallback: click search button if someone ever refactors runSearch away
+      const b = $("searchBtn");
+      if (b) b.click();
+    }
+  }
+
+  function applyAll() {
+    clearFilters();
+    try {
+      runSearch(true);
+    } catch (_) {
+      const b = $("searchBtn");
+      if (b) b.click();
+    }
+  }
+
+  window.BYPOps.applyMyDrafts = applyMyDrafts;
+  window.BYPOps.applyAll = applyAll;
+  window.BYPOps.fetchMe = fetchMe;
+
+  // Wire buttons if present (id preferred, text fallback)
+  function findButtonByText(text) {
+    const buttons = document.querySelectorAll("button");
+    const want = String(text || "").toLowerCase();
+    for (let i = 0; i < buttons.length; i++) {
+      const t = (buttons[i].textContent || "").trim().toLowerCase();
+      if (t === want) return buttons[i];
+    }
+    return null;
+  }
+
+  const myBtn = $("myDraftsBtn") || findButtonByText("My Drafts");
+  if (myBtn) myBtn.addEventListener("click", () => applyMyDrafts());
+
+  const allBtn = $("allBtn") || findButtonByText("All");
+  if (allBtn) allBtn.addEventListener("click", () => applyAll());
+
+  // Shortcut keys (avoid common browser combos)
+  window.addEventListener("keydown", (e) => {
+    try {
+      if (!e) return;
+      const key = String(e.key || "").toLowerCase();
+
+      if (e.ctrlKey && e.shiftKey && key === "k") {
+        e.preventDefault();
+        applyMyDrafts();
+      } else if (e.ctrlKey && e.shiftKey && key === "l") {
+        e.preventDefault();
+        applyAll();
+      }
+    } catch (_) {}
+  });
 
   // When navigating back from detail, browsers may restore this page from bfcache.
   // Ensure the table isn't stale.

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 
 import json
@@ -31,7 +31,53 @@ from app.models.audit_log import AuditLog
 from app.services.order_service import create_order as create_order_service, finalize_order
 from app.services.trello_service import rebuild_order_checklist, TrelloConfigError, card_exists
 
+
 router = APIRouter(prefix="/orders", tags=["Orders"])
+
+# ---- Auth dependencies (session-cookie based) ----
+def _session_user(request: Request) -> dict | None:
+    try:
+        s = getattr(request, "session", None) or {}
+        username = (s.get("username") or "").strip()
+        if not username:
+            return None
+        return {
+            "user_id": s.get("user_id"),
+            "username": username,
+            "role": (s.get("role") or "").strip().lower(),
+            "rep_code": (s.get("rep_code") or "").strip().upper(),
+            "rep_name": (s.get("rep_name") or "").strip(),
+        }
+    except Exception:
+        return None
+
+
+def require_login(request: Request) -> dict:
+    u = _session_user(request)
+    if not u:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    return u
+
+
+def require_admin(request: Request) -> dict:
+    u = require_login(request)
+    if u.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin required")
+    return u
+
+
+def _actor_from_session_or_initials(session_user: dict | None, initials: str | None) -> str:
+    # Prefer explicit initials for backward compatibility, otherwise use rep_code, otherwise username.
+    if initials and str(initials).strip():
+        return _clean_actor(initials)
+    if session_user:
+        if session_user.get("rep_code"):
+            return _clean_actor(session_user["rep_code"])
+        if session_user.get("username"):
+            return _clean_actor(session_user["username"])
+    return "SYSTEM"
+
+
 
 class OrderSearchResponse(BaseModel):
     total: int
@@ -189,9 +235,15 @@ def _default_notes_for_new_order(asset_type: str, existing_notes: str | None) ->
 
 @router.get("/", response_model=list[OrderResponse])
 def list_orders(
+    request: Request,
     db: Session = Depends(get_db),
     include_deleted: bool = Query(default=False, description="Include soft-deleted orders (admin use)."),
+    session_user: dict = Depends(require_login),
 ):
+    if include_deleted:
+        if session_user.get("role") != "admin":
+            raise HTTPException(status_code=403, detail="Admin required for include_deleted")
+
     q = db.query(Order)
     if not include_deleted:
         q = q.filter(or_(Order.is_deleted == False, Order.is_deleted.is_(None)))
@@ -259,6 +311,7 @@ def _orders_search_query(
 
 @router.get("/search", response_model=list[OrderResponse])
 def search_orders(
+    request: Request,
     db: Session = Depends(get_db),
     artist: str | None = Query(default=None, description="Artist contains (case-insensitive)."),
     notes: str | None = Query(default=None, description="Notes contains (case-insensitive)."),
@@ -269,7 +322,12 @@ def search_orders(
     status: str | None = Query(default=None, description="draft or finalized"),
     rep_code: str | None = Query(default=None, description="Rep initials equals (e.g., SB)."),
     include_deleted: bool = Query(default=False, description="Include soft-deleted orders (admin use)."),
+    session_user: dict = Depends(require_login),
 ):
+    if include_deleted:
+        if session_user.get("role") != "admin":
+            raise HTTPException(status_code=403, detail="Admin required for include_deleted")
+
     q = _orders_search_query(
         db,
         artist=artist,
@@ -291,6 +349,7 @@ def search_orders(
 
 @router.get("/search2", response_model=OrderSearchResponse)
 def search_orders2(
+    request: Request,
     db: Session = Depends(get_db),
     artist: str | None = Query(default=None, description="Artist contains (case-insensitive)."),
     notes: str | None = Query(default=None, description="Notes contains (case-insensitive)."),
@@ -332,8 +391,10 @@ def search_orders2(
 
 @router.post("/new", response_model=OrderResponse)
 def create_order(
+    request: Request,
     payload: OrderCreate,
     db: Session = Depends(get_db),
+    session_user: dict = Depends(require_login),
     initials: str | None = Query(default=None, description="Your initials for audit log (optional)."),
 ):
     # Auto-prepend default boilerplate for NEW radio/video orders (art excluded).
@@ -351,7 +412,7 @@ def create_order(
         .first()
     )
 
-    actor = _clean_actor(initials)
+    actor = _actor_from_session_or_initials(session_user, initials)
     _audit(db, action="create", actor=actor, order=created, details={"endpoint": "/orders/new"})
     db.commit()
 
@@ -360,10 +421,12 @@ def create_order(
 
 @router.post("/{order_id}/finalize", response_model=OrderResponse)
 def finalize(
+    request: Request,
     order_id: int,
     trello_card_id: str | None = Query(default=None, description="Optional: Trello card id. If omitted, uses stored value on the order."),
     trello_checklist_id: str | None = Query(default=None, description="Optional: Trello checklist id. If omitted, uses stored value on the order."),
     db: Session = Depends(get_db),
+    session_user: dict = Depends(require_login),
     initials: str | None = Query(default=None, description="Your initials for audit log (optional)."),
 ):
     order = db.query(Order).options(joinedload(Order.sp)).filter(Order.id == order_id).first()
@@ -400,7 +463,7 @@ def finalize(
     )
 
     after = _order_snapshot(updated)
-    actor = _clean_actor(initials)
+    actor = _actor_from_session_or_initials(session_user, initials)
     _audit(
         db,
         action="finalize",
@@ -419,8 +482,10 @@ def finalize(
 
 @router.post("/{order_id}/unfinalize", response_model=OrderResponse)
 def unfinalize_order(
+    request: Request,
     order_id: int,
     db: Session = Depends(get_db),
+    session_user: dict = Depends(require_login),
     initials: str | None = Query(default=None, description="Your initials for audit log (optional)."),
 ):
     """Reopen a finalized order back to draft (no Trello required)."""
@@ -441,7 +506,7 @@ def unfinalize_order(
 
     after = _order_snapshot(order)
 
-    actor = _clean_actor(initials)
+    actor = _actor_from_session_or_initials(session_user, initials)
     _audit(
         db,
         action="unfinalize",
@@ -462,8 +527,10 @@ def unfinalize_order(
 
 @router.post("/{order_id}/revise", response_model=OrderResponse)
 def revise_order(
+    request: Request,
     order_id: int,
     db: Session = Depends(get_db),
+    session_user: dict = Depends(require_login),
     initials: str | None = Query(default=None, description="Your initials for audit log (optional)."),
 ):
     parent = db.query(Order).options(joinedload(Order.sp)).filter(Order.id == order_id).first()
@@ -546,7 +613,7 @@ def revise_order(
         .first()
     )
 
-    actor = _clean_actor(initials)
+    actor = _actor_from_session_or_initials(session_user, initials)
     _audit(db, action="create", actor=actor, order=new_order, details={"kind": "revision", "parent_order_id": parent.id})
     db.commit()
 
@@ -555,8 +622,10 @@ def revise_order(
 
 @router.post("/{order_id}/addl_vers", response_model=OrderResponse)
 def addl_vers_order(
+    request: Request,
     order_id: int,
     db: Session = Depends(get_db),
+    session_user: dict = Depends(require_login),
     initials: str | None = Query(default=None, description="Your initials for audit log (optional)."),
 ):
     parent = db.query(Order).options(joinedload(Order.sp)).filter(Order.id == order_id).first()
@@ -615,7 +684,7 @@ def addl_vers_order(
         .first()
     )
 
-    actor = _clean_actor(initials)
+    actor = _actor_from_session_or_initials(session_user, initials)
     _audit(db, action="create", actor=actor, order=new_order, details={"kind": "addl_vers", "parent_order_id": parent.id})
     db.commit()
 
@@ -627,8 +696,10 @@ def addl_vers_order(
 
 @router.post("/{order_id}/duplicate", response_model=OrderResponse)
 def duplicate_order(
+    request: Request,
     order_id: int,
     db: Session = Depends(get_db),
+    session_user: dict = Depends(require_login),
     initials: str | None = Query(default=None, description="Your initials for audit log (optional)."),
 ):
     """Create a fresh draft copy of an order with the same fields (no revision/addl links)."""
@@ -674,7 +745,7 @@ def duplicate_order(
         .first()
     )
 
-    actor = _clean_actor(initials)
+    actor = _actor_from_session_or_initials(session_user, initials)
     _audit(db, action="create", actor=actor, order=new_order, details={"kind": "duplicate", "source_order_id": parent.id})
     db.commit()
 
@@ -682,9 +753,11 @@ def duplicate_order(
 
 @router.get("/{order_id}", response_model=OrderResponse)
 def get_order(
+    request: Request,
     order_id: int,
     db: Session = Depends(get_db),
     include_deleted: bool = Query(default=False, description="Include soft-deleted orders (admin use)."),
+    session_user: dict = Depends(require_login),
 ):
     order = (
         db.query(Order)
@@ -694,6 +767,10 @@ def get_order(
     )
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
+
+    if include_deleted:
+        if session_user.get("role") != "admin":
+            raise HTTPException(status_code=403, detail="Admin required for include_deleted")
 
     if not include_deleted and getattr(order, "is_deleted", False):
         raise HTTPException(status_code=404, detail="Order not found")
@@ -706,10 +783,12 @@ def get_order(
 
 @router.delete("/{order_id}")
 def delete_order(
+    request: Request,
     order_id: int,
     initials: str = Query(..., description="Your initials (required)."),
     force: bool = Query(default=False, description="Allow deleting finalized orders."),
     db: Session = Depends(get_db),
+    session_user: dict = Depends(require_login),
 ):
     order = db.query(Order).options(joinedload(Order.sp)).filter(Order.id == order_id).first()
     if not order:
@@ -747,10 +826,12 @@ def delete_order(
 
 @router.patch("/{order_id}", response_model=OrderResponse)
 def update_order(
+    request: Request,
     order_id: int,
     payload: OrderUpdate,
     override: bool = Query(default=False, description="Allow editing finalized orders + sync Trello checklist."),
     db: Session = Depends(get_db),
+    session_user: dict = Depends(require_login),
     initials: str | None = Query(default=None, description="Your initials for audit log (optional)."),
 ):
     order = db.query(Order).options(joinedload(Order.sp)).filter(Order.id == order_id).first()
@@ -855,7 +936,7 @@ def update_order(
 
     # Audit after all changes have settled (including possible Trello id changes)
     after = _order_snapshot(order)
-    actor = _clean_actor(initials)
+    actor = _actor_from_session_or_initials(session_user, initials)
     _audit(
         db,
         action="update",

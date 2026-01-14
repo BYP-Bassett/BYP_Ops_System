@@ -1,8 +1,4 @@
-from __future__ import annotations
-
 import os
-import sys
-from pathlib import Path
 from logging.config import fileConfig
 
 from sqlalchemy import engine_from_config
@@ -10,53 +6,41 @@ from sqlalchemy import pool
 
 from alembic import context
 
-# Alembic Config object (read from alembic.ini)
+# this is the Alembic Config object, which provides
+# access to the values within the .ini file in use.
 config = context.config
 
-# Configure Python logging from the config file
+# Interpret the config file for Python logging.
+# This line sets up loggers basically.
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-# --- Make sure our backend package is importable ---
-# This file lives at: <backend>\alembic\env.py
-# So the backend root is the parent of this file's parent.
-BACKEND_ROOT = Path(__file__).resolve().parents[1]
-if str(BACKEND_ROOT) not in sys.path:
-    sys.path.insert(0, str(BACKEND_ROOT))
-
-# --- Import SQLAlchemy metadata for autogenerate ---
-# NOTE: We import the Base *and* import model modules so their tables are registered.
+# --- target_metadata wiring (IMPORTANT) ---
 try:
-    from app.models.base import Base  # type: ignore
-except Exception:  # pragma: no cover
-    # Fallback if your Base is exposed differently
-    from app.models import Base  # type: ignore
-
-# Import models so Alembic "sees" them for autogenerate
-try:
-    import importlib
-    for mod in ("app.models.orders", "app.models.sp_master", "app.models.audit_log"):
-        try:
-            importlib.import_module(mod)
-        except Exception:
-            pass
+    from app.models.base import Base
 except Exception:
-    pass
+    # Fallback if base was moved/renamed
+    from app.models import Base  # type: ignore
 
 target_metadata = Base.metadata
 
+# Import models so Alembic autogenerate can see tables
+from app.models import orders  # noqa: F401
+from app.models import sp_master  # noqa: F401
+from app.models import audit_log  # noqa: F401
+from app.models import users  # noqa: F401
 
-def _get_database_url() -> str:
-    # Prefer DATABASE_URL if set (useful later for Postgres), otherwise alembic.ini.
-    env_url = os.getenv("DATABASE_URL")
-    if env_url:
-        return env_url
-    return config.get_main_option("sqlalchemy.url")
+
+def get_url():
+    # Mirror runtime DATABASE_URL logic:
+    # Prefer env var, otherwise rely on alembic.ini's sqlalchemy.url
+    url = os.getenv("DATABASE_URL")
+    return url
 
 
 def run_migrations_offline() -> None:
     """Run migrations in 'offline' mode."""
-    url = _get_database_url()
+    url = get_url() or config.get_main_option("sqlalchemy.url")
     context.configure(
         url=url,
         target_metadata=target_metadata,
@@ -71,9 +55,11 @@ def run_migrations_offline() -> None:
 
 def run_migrations_online() -> None:
     """Run migrations in 'online' mode."""
-    # Override sqlalchemy.url from env var if provided
     configuration = config.get_section(config.config_ini_section) or {}
-    configuration["sqlalchemy.url"] = _get_database_url()
+
+    env_url = get_url()
+    if env_url:
+        configuration["sqlalchemy.url"] = env_url
 
     connectable = engine_from_config(
         configuration,

@@ -1,16 +1,11 @@
-# Thread Handoff — SP Order System (Thread #18 → next)
+# SP Order System — Thread Handoff (Thread #21 start)
 
-## 1) Current Truth
+## 1) Current Truth (what is working right now)
 
-### Backend root
-`C:\BYP_Ops_System\backend`
-
-### venv
-`.\venv\Scripts\python.exe`
-
-### DB
-- `backend\byp_ops.db` (SQLite)
-- Engine URL: `sqlite:///C:/BYP_Ops_System/backend/byp_ops.db`
+**Backend root:** `C:\BYP_Ops_System\backend`  
+**venv:** `.\venv\Scripts\python.exe`  
+**DB:** `backend\byp_ops.db` (SQLite)  
+**Engine URL:** `sqlite:///C:/BYP_Ops_System/backend/byp_ops.db`
 
 ### Start API
 ```powershell
@@ -19,116 +14,134 @@ cd C:\BYP_Ops_System\backend
 ```
 
 ### Web UI
-- `http://127.0.0.1:8000/`
-- `/order/{id}` read-only page (fetches `/orders/{id}` JSON)
-- Parent copy widget (Revision/Add’l click-to-copy)
+- Search/list page: `http://127.0.0.1:8000/`
+- Order detail page: `http://127.0.0.1:8000/order/{id}`
+- Detail page pulls JSON from `/orders/{id}`
+- Web detail supports editing draft orders (asset_type dropdown draft-only) and Save works
 
-### Trello finalize behavior (backend) — WORKING
-- Finalizing **radio/video** with missing Trello linkage auto-creates:
-  - Trello card in rep’s board “To Do” list (title = full artist)
-  - Checklist named SP# on that card
-  - Stores `trello_card_id` + `trello_checklist_id` on the order
-  - Sets `status=finalized` and `finalized_at`
+### Finalize behavior (backend) — WORKING
+Finalizing **radio/video** with missing Trello linkage auto-creates:
+- Trello card (title = full artist) in rep’s board “To Do” list
+- Checklist named SP# (e.g., `SP000105`)
+- Stores `trello_card_id` + `trello_checklist_id` back on the order
+- Sets `status=finalized` and `finalized_at`
 
-### Durable Trello config — WORKING (after fixing .env)
-Config file:
-`C:\BYP_Ops_System\backend\.env`
+### Desktop GUI — WORKING
+- Desktop finalize uses backend finalize plumbing:
+  - No prompts for Trello card/checklist IDs
+  - Removed useless Yes/No confirmation popup on finalize
+- Desktop can change `asset_type`, and Save no longer freezes
+- Backend allows draft `asset_type` changes and keeps `SP.order_type` in sync
 
-Required keys:
-- `TRELLO_KEY=...`
-- `TRELLO_TOKEN=...`
-- `TRELLO_BOARD_ID_SB=8ePAKW8L`
-- `TRELLO_DEFAULT_BOARD_ID=8ePAKW8L`
-- `TRELLO_TODO_LIST_NAME=To Do`
+### Trello credentials bug — FIXED
+Root cause: `.env` had UTF-8 BOM (invisible leading char), so `TRELLO_KEY` didn’t parse reliably.  
+Fix: `app/services/trello_service.py` now loads `.env` robustly and strips BOM; `.env` re-saved as UTF-8 (no BOM).  
+Finalize on order **117** confirmed working after fix.
 
-### Desktop GUI
-Run:
-```powershell
-cd C:\BYP_Ops_System\backend
-python .\OrderSearchGUI.pyw
-```
-
-Status:
-- Desktop search/open works (after rollback).
-- Desktop finalize is still legacy (asks for Trello Card ID + Checklist ID).
+### Web Delete button situation (status)
+- We successfully restored web stability after multiple f-string/JS brace landmines.
+- Web now runs again; a Delete button experiment exists, but behavior still “meh” and is deprioritized.
+- We moved on rather than perfecting web delete UX.
 
 ---
 
 ## 2) Branch + latest savepoints
 
-Branch: `fix-delete-override`
+**Branch:** `fix-delete-override`
 
-Key tags:
+**Key tags:**
 - `savepoint-trello-finalize-autocreate-2026-01-12` (commit `426cd5da1af0e9fd8ab12fd8864c9f9732421ad9`)
-- `savepoint-trello-config-and-revise-2026-01-12` ✅ (commit `17aef48`) **CURRENT WORKING BACKEND**
+- `savepoint-trello-config-and-revise-2026-01-12` ✅ (commit `17aef48`)
+- `savepoint-desktop-finalize-backend-2026-01-13` ✅
+- `savepoint-web-asset-type-edit-2026-01-13` ✅
+- `savepoint-pre-auth-admin-2026-01-14` ✅ (NEW — before auth/admin work)
 
-Remote:
-- origin = `https://github.com/BYP-Bassett/BYP_Ops_System.git`
+**Remote:** `origin = https://github.com/BYP-Bassett/BYP_Ops_System.git`
 
 ---
 
-## 3) Canonical Rules
+## 3) How to start server + how to start GUI
+
+### API
+```powershell
+cd C:\BYP_Ops_System\backend
+.\venv\Scripts\python.exe -m uvicorn app.main:app --reload
+```
+
+### Desktop GUI
+```powershell
+cd C:\BYP_Ops_System\backend
+python OrderSearchGUI.pyw
+```
+
+(Optional compile check)
+```powershell
+python -m py_compile .\OrderSearchGUI.pyw
+```
+
+---
+
+## 4) Canonical Rules (must not violate)
 
 - One step at a time.
-- No manual file editing. If a change is needed:
-  - You upload the file
-  - I return a downloadable replacement with the **same exact filename**
+- No manual file editing.
+- If a file change is needed: **Steve uploads current file → I return a replacement download with the same exact filename.**
 - No renaming files. Ever.
 - Windows paths only.
 - GUI layout tweaks pinned unless explicitly unpinned.
-- No `${}` inside Python f-strings that embed HTML/JS.
+- No ${} inside Python f-strings that embed HTML/JS.
 
 ---
 
-## 4) Next Single Target
+## Next Single Target
 
-### Goal
-Make desktop finalize use the backend Trello plumbing so it never prompts for Trello IDs on radio/video.
+### Target: Start “finished system” work with Auth + Admin Users page
+Steve wants:
+- Admin page to add/disable users and assign rights
+- “My Drafts” button on the **web** (like desktop)
 
-### Do next
-Update `OrderSearchGUI.pyw` finalize flow so:
-- For **radio/video**: it calls `POST /orders/{id}/finalize` and relies on backend to handle Trello.
-- Avoid new UX; don’t break existing buttons/layout.
+**Scope for next thread (one-file-at-a-time):**
+1) Confirm DB plumbing location (session/base) so we can add a `users` table cleanly via Alembic.
+2) Then implement minimal auth + admin users page + web “My Drafts” (tied to logged-in rep).
 
-### Done when
-Desktop GUI:
-- Open order `41` (video, SB) and click Finalize
-- No Trello ID prompt
-- Order finalizes
-- After Refresh, Trello IDs + finalized_at show up
-- No UI regressions (no blank search grid, no extra stray Tk window, all previous buttons still present)
+**Next file to upload (first step):**
+- `backend/app/database/session.py`
+
+Done when (phase 1):
+- We can clearly identify `Base`, engine/session creation, and Alembic target metadata wiring.
 
 ---
 
-## 5) Smoke Tests + Landmines
+## Smoke Tests + Landmines
 
 ### API reachable
 ```powershell
 irm "http://127.0.0.1:8000/orders/search2?limit=5&offset=0"
 ```
 
-### Detail page works
-Open:
-- `http://127.0.0.1:8000/order/85`
-
-### Timestamps present
+### Order timestamps present
 ```powershell
 irm "http://127.0.0.1:8000/orders/72" | select created_at, updated_at
 ```
 
-### Trello finalize smoke test (backend)
+### Finalize Trello auto-create
 ```powershell
-irm -Method Post "http://127.0.0.1:8000/orders/103/finalize"
-irm "http://127.0.0.1:8000/orders/103" | select id,status,trello_card_id,trello_checklist_id,finalized_at
+irm -Method Post "http://127.0.0.1:8000/orders/117/finalize"
+irm "http://127.0.0.1:8000/orders/117" | select id,status,trello_card_id,trello_checklist_id,finalized_at
 ```
 
-### Desktop target check (order 41)
+### Draft asset_type change allowed + SP synced
 ```powershell
-irm "http://127.0.0.1:8000/orders/41" | select id,asset_type,rep_code,status
+irm -Method Patch "http://127.0.0.1:8000/orders/131" -ContentType "application/json" -Body '{"asset_type":"radio"}'
 ```
+
+### Web asset_type edit works
+- Open: `http://127.0.0.1:8000/order/131`
+- Change draft-only dropdown, Save, refresh, confirm persisted
 
 ### Landmines
-- Web UI empty table → browser console; hard refresh `Ctrl+F5`
+- Web UI blank / weird layout → **Ctrl+F5** + console
 - `/favicon.ico` 404 harmless
-- HTML/JS SyntaxError → look for `${}` inside Python f-strings
-- `.env` must be plain `KEY=VALUE` lines only
+- Trello creds “missing” again → `.env` encoding/BOM (guarded + file re-saved)
+- `.env` must be clean `KEY=VALUE` lines only
+- **Big one:** JS braces inside Python f-strings can crash Uvicorn. Avoid embedding complex JS in f-strings.
