@@ -13,6 +13,7 @@ from app.models.orders import Order
 from app.services.sp_service import generate_next_sp
 from app.services.trello_service import (
     create_card_in_list,
+    create_checklist_on_card,
     ensure_sp_checklist,
     find_list_id_by_name,
 )
@@ -27,7 +28,7 @@ def get_order_by_id(db: Session, order_id: int):
 
 
 def create_order(db: Session, data):
-    # If Radio/Video → generate SP
+    # If Radio/Video → generate SP (ART does NOT use SP numbers)
     sp_record = None
     if data.asset_type in ["radio", "video"]:
         sp_record = generate_next_sp(db, data.asset_type)
@@ -99,6 +100,46 @@ def _build_card_desc(order: Order, sp_number: str | None) -> str:
         lines.append(order.notes)
     return "\n".join(lines).strip()
 
+def _notes_to_items_local(notes: str | None) -> list[str]:
+    items: list[str] = []
+    if not notes:
+        return items
+    for raw in (notes or '').splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        # strip leading bullets
+        line = line.lstrip('-*•	 ').strip()
+        if line:
+            items.append(line)
+    return items
+
+
+def _art_checklist_name(*, db: Session, order: Order, now: datetime) -> str:
+    mmddyy = now.strftime('%m%d%y')
+
+    root_id = getattr(order, 'parent_order_id', None) or getattr(order, 'id', None)
+    r_num = 1
+
+    try:
+        if root_id:
+            q = (
+                db.query(Order)
+                .filter(
+                    Order.asset_type == 'art',
+                    Order.status == 'finalized',
+                    Order.trello_checklist_id.isnot(None),
+                    (Order.id == root_id) | (Order.parent_order_id == root_id),
+                )
+            )
+            existing = int(q.count() or 0)
+            r_num = max(1, existing + 1)
+    except Exception:
+        r_num = 1
+
+    return f"{mmddyy}-R{r_num}"
+
+
 
 def finalize_order(
     db: Session,
@@ -115,7 +156,12 @@ def finalize_order(
       - Create checklist named exactly SP# and populate items derived from notes.
       - Store Trello IDs on the order, then finalize.
 
-    Non radio/video: requires linkage to already exist (Art later).
+    ART target behavior:
+      - If Trello linkage missing, create Trello card in rep's board "To Do" list.
+      - Create checklist named MMDDYY-R# and populate items derived from notes.
+      - Store Trello IDs on the order, then finalize.
+
+    Non radio/video/art: requires linkage to already exist.
     """
     card_id = (trello_card_id or "").strip() or (getattr(order, "trello_card_id", None) or "").strip()
     checklist_id = (trello_checklist_id or "").strip() or (getattr(order, "trello_checklist_id", None) or "").strip()
@@ -158,10 +204,37 @@ def finalize_order(
                 notes=getattr(order, "notes", None),
             )
 
+    elif asset == "art":
+        # ART uses date-based checklist codes like MMDDYY-R# (no SP numbers).
+        if not card_id:
+            board_id = _env_board_id_for_rep(getattr(order, "rep_code", None))
+            if not board_id:
+                raise RuntimeError(
+                    "Missing Trello board mapping. Set TRELLO_BOARD_ID_<REP> or TRELLO_DEFAULT_BOARD_ID."
+                )
+
+            list_name = os.environ.get("TRELLO_TODO_LIST_NAME", "To Do").strip() or "To Do"
+            list_id = find_list_id_by_name(board_id=board_id, list_name=list_name)
+
+            title = (getattr(order, "artist", "") or "").strip()
+            if not title:
+                raise RuntimeError("Cannot create Trello card: order.artist is blank.")
+
+            desc = _build_card_desc(order, None)
+            created = create_card_in_list(list_id=list_id, name=title, desc=desc or None)
+            card_id = created["id"]
+
+        if not checklist_id:
+            now = datetime.now()
+            checklist_name = _art_checklist_name(db=db, order=order, now=now)
+            items = _notes_to_items_local(getattr(order, "notes", None))
+            checklist_id = create_checklist_on_card(card_id=card_id, name=checklist_name, items=items)
+
     else:
         if not card_id or not checklist_id:
-            raise RuntimeError("Finalize requires Trello linkage for this asset type (radio/video auto-create only).")
-
+            raise RuntimeError(
+                "Finalize requires Trello linkage for this asset type (radio/video/art auto-create only)."
+            )
     order.status = "finalized"
     order.finalized_at = datetime.now().isoformat()
     order.trello_card_id = card_id
