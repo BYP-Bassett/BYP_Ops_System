@@ -115,8 +115,15 @@ async def _auth_session_guard(request: Request, call_next):
             if (not user) or (not bool(getattr(user, "is_active", True))):
                 _clear_session(request)
 
-                # API endpoints (desktop + web JS fetches) should get a hard 401.
-                if path.startswith("/orders") or path == "/me":
+                # Decide whether to respond like an API (401 JSON) or like a browser (303 to /login).
+                # Desktop callers usually send Accept: */* (or application/json). Browser navigations usually include text/html.
+                accept = (request.headers.get("accept") or "").lower()
+                wants_html = ("text/html" in accept) and ("application/json" not in accept)
+
+                is_api_path = path.startswith("/orders") or path.startswith("/admin") or path == "/me"
+
+                # API endpoints (desktop + fetch calls) should get a hard 401.
+                if is_api_path and not wants_html:
                     return JSONResponse(status_code=401, content={"detail": "Not authenticated"})
 
                 # Browser pages redirect to login.
