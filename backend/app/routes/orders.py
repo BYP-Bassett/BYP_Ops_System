@@ -77,6 +77,46 @@ def _actor_from_session_or_initials(session_user: dict | None, initials: str | N
             return _clean_actor(session_user["username"])
     return "SYSTEM"
 
+def _stamp_order_user_ids(order: Order, session_user: dict | None, *, created: bool = False, deleted: bool = False) -> None:
+    """Populate the new user-id audit columns on Order from the current session user.
+
+    - created=True sets created_by_user_id (and also updated_by_user_id)
+    - deleted=True sets deleted_by_user_id (and also updated_by_user_id)
+    Always sets updated_by_user_id when a user_id is present.
+    """
+    try:
+        if not session_user:
+            return
+        uid = session_user.get("user_id")
+        if uid is None:
+            return
+        # tolerate string ids
+        try:
+            uid_int = int(uid)
+        except Exception:
+            return
+
+        if created and hasattr(order, "created_by_user_id"):
+            try:
+                setattr(order, "created_by_user_id", uid_int)
+            except Exception:
+                pass
+
+        if deleted and hasattr(order, "deleted_by_user_id"):
+            try:
+                setattr(order, "deleted_by_user_id", uid_int)
+            except Exception:
+                pass
+
+        if hasattr(order, "updated_by_user_id"):
+            try:
+                setattr(order, "updated_by_user_id", uid_int)
+            except Exception:
+                pass
+    except Exception:
+        # never let audit stamping break endpoint behavior
+        return
+
 
 
 class OrderSearchResponse(BaseModel):
@@ -412,6 +452,8 @@ def create_order(
         .first()
     )
 
+
+    _stamp_order_user_ids(created, session_user, created=True)
     actor = _actor_from_session_or_initials(session_user, initials)
     _audit(db, action="create", actor=actor, order=created, details={"endpoint": "/orders/new"})
     db.commit()
@@ -462,6 +504,8 @@ def finalize(
         .first()
     )
 
+    _stamp_order_user_ids(updated, session_user)
+
     after = _order_snapshot(updated)
     actor = _actor_from_session_or_initials(session_user, initials)
     _audit(
@@ -504,6 +548,8 @@ def unfinalize_order(
     order.status = "draft"
     order.finalized_at = None
 
+
+    _stamp_order_user_ids(order, session_user)
     after = _order_snapshot(order)
 
     actor = _actor_from_session_or_initials(session_user, initials)
@@ -594,6 +640,8 @@ def revise_order(
     db.commit()
     db.refresh(new_order)
 
+    _stamp_order_user_ids(new_order, session_user, created=True)
+
 
     # Ensure the SP record also tracks the revision chain
 
@@ -668,6 +716,8 @@ def addl_vers_order(
     db.commit()
     db.refresh(new_order)
 
+    _stamp_order_user_ids(new_order, session_user, created=True)
+
 
     # Track additional-version chain on the SP record (immediate parent only)
     if getattr(new_order, "sp_id", None):
@@ -735,6 +785,8 @@ def duplicate_order(
         new_order.rep_code = parent.rep_code
     db.commit()
     db.refresh(new_order)
+
+    _stamp_order_user_ids(new_order, session_user, created=True)
 
 
     # Reload with SP joined for consistent API response
@@ -810,6 +862,8 @@ def delete_order(
     order.deleted_at = _now_iso()
     order.deleted_by = initials_clean
 
+
+    _stamp_order_user_ids(order, session_user, deleted=True)
     _audit(
         db,
         action="delete",
@@ -905,6 +959,8 @@ def update_order(
     # If your OrderUpdate schema ever includes status, still block it here.
     if hasattr(payload, "status") and getattr(payload, "status") is not None:
         raise HTTPException(status_code=400, detail="status cannot be updated here; use /orders/{id}/finalize")
+    _stamp_order_user_ids(order, session_user)
+
 
     db.commit()
     db.refresh(order)

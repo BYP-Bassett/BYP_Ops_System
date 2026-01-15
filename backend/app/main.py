@@ -6,8 +6,8 @@ import hashlib
 import base64
 from pathlib import Path
 
-from fastapi import FastAPI, Form, Request
-from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
+from fastapi import FastAPI, Form, Request, Body, HTTPException
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 
@@ -85,6 +85,57 @@ def _clear_session(request: Request) -> None:
     except Exception:
         # SessionMiddleware should make this safe, but don't crash the app over it.
         pass
+
+# ---- Session guard: enforce disabled users are logged out everywhere ----
+# If a user is toggled inactive in Admin, their existing sessions are rejected on the very next request.
+@app.middleware("http")
+async def _auth_session_guard(request: Request, call_next):
+    # IMPORTANT: SessionMiddleware must be installed to use request.session.
+    # If it's not in the scope yet, just pass through (prevents 500s on startup/misorder).
+    if "session" not in request.scope:
+        return await call_next(request)
+
+    path = (request.url.path or "")
+
+    # Allow public / bootstrap routes
+    if (
+        path.startswith("/login")
+        or path.startswith("/web")
+        or path in ("/health", "/favicon.ico")
+    ):
+        return await call_next(request)
+
+    uid = request.session.get("user_id")
+
+    # If we have a session, validate it against the DB every request (simple + reliable for now).
+    if uid is not None:
+        db = SessionLocal()
+        try:
+            user = db.query(User).filter(User.id == int(uid)).first()
+            if (not user) or (not bool(getattr(user, "is_active", True))):
+                _clear_session(request)
+
+                # API endpoints (desktop + web JS fetches) should get a hard 401.
+                if path.startswith("/orders") or path == "/me":
+                    return JSONResponse(status_code=401, content={"detail": "Not authenticated"})
+
+                # Browser pages redirect to login.
+                return RedirectResponse(url="/login?error=Session+expired", status_code=303)
+
+            # Keep session fields in sync if admin changed role/rep info.
+            try:
+                request.session["username"] = str(user.username)
+                request.session["rep_code"] = str(user.rep_code or "")
+                request.session["rep_name"] = str(user.rep_name or "")
+                request.session["role"] = str(user.role or "user")
+                request.session["is_active"] = bool(getattr(user, "is_active", True))
+            except Exception:
+                pass
+        finally:
+            db.close()
+
+    return await call_next(request)
+
 
 
 @app.get("/me")
@@ -222,12 +273,238 @@ def _html_escape(s: str) -> str:
     )
 
 
+# ---- Admin JSON API (for Desktop Admin Users parity) ----
+def _require_admin_or_401(request: Request) -> None:
+    if not _is_logged_in(request):
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    if not _is_admin(request):
+        raise HTTPException(status_code=403, detail="Admin only")
+
+
+def _user_to_dict(u: User) -> dict:
+    d = {
+        "id": int(getattr(u, "id")),
+        "username": str(getattr(u, "username") or ""),
+        "rep_code": str(getattr(u, "rep_code") or ""),
+        "rep_name": str(getattr(u, "rep_name") or ""),
+        "role": str(getattr(u, "role") or "user"),
+        "is_active": bool(getattr(u, "is_active", True)),
+    }
+    # Optional email field if model supports it
+    if hasattr(u, "email"):
+        try:
+            d["email"] = str(getattr(u, "email") or "")
+        except Exception:
+            d["email"] = ""
+    return d
+
+
+def _list_users() -> list[dict]:
+    db = SessionLocal()
+    try:
+        users = db.query(User).order_by(User.id.asc()).all()
+        return [_user_to_dict(u) for u in users]
+    finally:
+        db.close()
+
+
+@app.get("/admin/users/list", include_in_schema=False)
+def admin_users_list(request: Request):
+    _require_admin_or_401(request)
+    return {"users": _list_users()}
+
+
+@app.get("/admin/users/json", include_in_schema=False)
+def admin_users_json(request: Request):
+    _require_admin_or_401(request)
+    return {"users": _list_users()}
+
+
+@app.get("/admin/users.json", include_in_schema=False)
+def admin_users_json_dot(request: Request):
+    _require_admin_or_401(request)
+    return {"users": _list_users()}
+
+
+@app.get("/admin/api/users", include_in_schema=False)
+def admin_api_users_list(request: Request):
+    _require_admin_or_401(request)
+    return {"users": _list_users()}
+
+
+@app.post("/admin/users", include_in_schema=False)
+def admin_users_create_json(request: Request, payload: dict = Body(...)):
+    _require_admin_or_401(request)
+
+    u = (str(payload.get("username") or "")).strip().lower()
+    pw = (str(payload.get("password") or "")).strip()
+    if not u:
+        raise HTTPException(status_code=400, detail="username required")
+    if not pw:
+        raise HTTPException(status_code=400, detail="password required")
+
+    rc = (str(payload.get("rep_code") or "")).strip()
+    rn = (str(payload.get("rep_name") or "")).strip()
+    role = (str(payload.get("role") or "user")).strip().lower()
+    if role not in ("user", "admin"):
+        role = "user"
+    is_active = bool(payload.get("is_active", True))
+    email = (str(payload.get("email") or "")).strip()
+
+    db = SessionLocal()
+    try:
+        existing = db.query(User).filter(User.username == u).first()
+        if existing:
+            raise HTTPException(status_code=409, detail="username already exists")
+
+        new_user = User(
+            username=u,
+            rep_code=rc,
+            rep_name=rn,
+            role=role,
+            is_active=is_active,
+            password_hash="plain:" + pw,
+        )
+        if hasattr(new_user, "email"):
+            try:
+                setattr(new_user, "email", email)
+            except Exception:
+                pass
+
+        db.add(new_user)
+        db.commit()
+        db.refresh(new_user)
+        return {"status": "ok", "user": _user_to_dict(new_user)}
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        db.close()
+
+
+@app.post("/admin/users/create", include_in_schema=False)
+def admin_users_create_alias(request: Request, payload: dict = Body(...)):
+    # Alias for desktop callers
+    return admin_users_create_json(request, payload)
+
+
+@app.post("/admin/api/users", include_in_schema=False)
+def admin_api_users_create(request: Request, payload: dict = Body(...)):
+    # Alias for desktop callers
+    return admin_users_create_json(request, payload)
+
+
+@app.patch("/admin/users/{user_id}", include_in_schema=False)
+def admin_users_patch(request: Request, user_id: int, payload: dict = Body(...)):
+    _require_admin_or_401(request)
+    db = SessionLocal()
+    try:
+        user = db.query(User).filter(User.id == int(user_id)).first()
+        if not user:
+            raise HTTPException(status_code=404, detail="user not found")
+
+        if "role" in payload:
+            role = (str(payload.get("role") or "user")).strip().lower()
+            if role not in ("user", "admin"):
+                role = "user"
+            setattr(user, "role", role)
+
+        if "is_active" in payload:
+            setattr(user, "is_active", bool(payload.get("is_active")))
+
+        if "rep_code" in payload:
+            setattr(user, "rep_code", (str(payload.get("rep_code") or "")).strip())
+
+        if "rep_name" in payload:
+            setattr(user, "rep_name", (str(payload.get("rep_name") or "")).strip())
+
+        if "email" in payload and hasattr(user, "email"):
+            try:
+                setattr(user, "email", (str(payload.get("email") or "")).strip())
+            except Exception:
+                pass
+
+        db.commit()
+        db.refresh(user)
+        return {"status": "ok", "user": _user_to_dict(user)}
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        db.close()
+
+
+@app.post("/admin/users/{user_id}/password", include_in_schema=False)
+def admin_users_set_password_json(request: Request, user_id: int, payload: dict = Body(...)):
+    _require_admin_or_401(request)
+    pw = (str(payload.get("password") or "")).strip()
+    if not pw:
+        raise HTTPException(status_code=400, detail="password required")
+
+    db = SessionLocal()
+    try:
+        user = db.query(User).filter(User.id == int(user_id)).first()
+        if not user:
+            raise HTTPException(status_code=404, detail="user not found")
+        setattr(user, "password_hash", "plain:" + pw)
+        db.commit()
+        return {"status": "ok"}
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        db.close()
+
+
+@app.post("/admin/users/{user_id}/role", include_in_schema=False)
+def admin_users_set_role_json(request: Request, user_id: int, payload: dict = Body(...)):
+    _require_admin_or_401(request)
+    role = (str(payload.get("role") or "user")).strip().lower()
+    if role not in ("admin", "user"):
+        raise HTTPException(status_code=400, detail="role must be admin or user")
+    return admin_users_patch(request, user_id, {"role": role})
+
+
+@app.post("/admin/users/{user_id}/toggle", include_in_schema=False)
+def admin_users_toggle_json(request: Request, user_id: int):
+    _require_admin_or_401(request)
+    db = SessionLocal()
+    try:
+        user = db.query(User).filter(User.id == int(user_id)).first()
+        if not user:
+            raise HTTPException(status_code=404, detail="user not found")
+        cur = bool(getattr(user, "is_active", True))
+        setattr(user, "is_active", (not cur))
+        db.commit()
+        db.refresh(user)
+        return {"status": "ok", "user": _user_to_dict(user)}
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        db.close()
+
 # ---- Admin: Users page ----
 @app.get("/admin/users", include_in_schema=False)
-def admin_users_page(request: Request, msg: str | None = None, err: str | None = None):
+def admin_users_page(request: Request, msg: str | None = None, err: str | None = None, json: int | None = None, format: str | None = None):
     gate = _require_admin_or_redirect(request)
     if gate is not None:
         return gate
+
+    if (json is not None and int(json) == 1) or (str(format or '').strip().lower() == 'json'):
+        return JSONResponse(content={"users": _list_users()})
 
     db = SessionLocal()
     try:

@@ -1,59 +1,69 @@
-# Project Brain — SP Order System (as of 2026-01-14)
+# Project Brain — SP Order System (as of 2026-01-15)
 
-## What this system is
-A Windows-first BYP Ops Order System with:
-- FastAPI backend + SQLite dev DB
+## Goal
+Replace legacy FileMaker workflows with a Windows-first order system:
+- FastAPI backend + SQLite (dev)
 - Desktop Tkinter GUI (office use)
-- Simple web UI (remote use)
+- Simple Web UI (remote use)
+- Trello integration on finalize for radio/video
+- Real user auth + admin user management
 
-Core objects:
-- Orders (draft/finalized, asset types, notes, client info)
-- SP numbers / SP order_type sync
-- Trello integration on finalize (auto-create card + checklist when missing linkages)
-- Audit trail for key actions (in progress / partial)
+## Architecture (current)
+- **API:** FastAPI (`app/main.py`)
+- **DB:** SQLite `backend/byp_ops.db` via SQLAlchemy
+- **Migrations:** Alembic (`backend/alembic/*`)
+- **Desktop:** `OrderSearchGUI.pyw` (Tkinter)
+- **Web:** static-ish UI served from FastAPI (`/`, `/order/<built-in function id>`)
 
-## Working right now (truth, not vibes)
-- Backend runs from `C:\BYP_Ops_System\backend`
-- API starts with uvicorn `app.main:app --reload`
-- Web:
-  - `/` search/list
-  - `/order/{id}` detail/edit (draft-only asset_type dropdown)
-- Desktop:
-  - Uses backend finalize plumbing (no Trello prompts, no confirm popup)
-  - Draft asset_type changes save and no longer freeze
-  - Backend keeps SP.order_type in sync with order.asset_type for drafts
-- Trello `.env` BOM issue fixed (loader strips BOM; `.env` re-saved no BOM)
+## Entrypoints
+### Start API
+```powershell
+cd C:\BYP_Ops_System\backend
+.\venv\Scripts\python.exe -m uvicorn app.main:app --reload
+```
 
-## Current branch + savepoints
-- Branch: `fix-delete-override`
-- Savepoints:
-  - `savepoint-trello-finalize-autocreate-2026-01-12`
-  - `savepoint-trello-config-and-revise-2026-01-12`
-  - `savepoint-desktop-finalize-backend-2026-01-13`
-  - `savepoint-web-asset-type-edit-2026-01-13`
-  - `savepoint-pre-auth-admin-2026-01-14` (before starting auth/admin)
+### Start Desktop GUI
+```powershell
+cd C:\BYP_Ops_System\backend
+python OrderSearchGUI.pyw
+```
 
-## Known pain points / lessons learned
-- Editing Python f-string embedded HTML/JS is a minefield:
-  - Any `{` / `}` (JS braces) can break Python parsing unless escaped.
-  - Any `\n` vs `\
-` inside JS string literals can create “unescaped line break” JS syntax errors.
-  - Prefer template strings without f-strings (or serve static JS files) to avoid server crashes.
-- Web Delete was attempted; not worth polishing right now.
+## Current Working State (truth)
+- Web UI works and is **login-gated**.
+- Desktop GUI works and is **login-gated**; it can remember login via cookies.
+- Web Admin Users page exists at `/admin/users`.
+- Trello finalize auto-create works when missing linkages.
+- Orders have new user-id audit columns and routes stamp them on writes.
+- Alembic heads were merged (confirm single head).
 
-## Next logical “finish the system” work
-### Users + Auth + Admin panel
-Steve wants:
-- Admin page to add users and assign rights
-- Web “My Drafts” button (like desktop)
+## Current Known Gaps (still pending)
+- Desktop does **not** have an admin users page (web-only right now).
+- Delete/override flows still prompt for “initials” in places; legacy `deleted_by` remains.
+- Need to harden “disable user” behavior to ensure existing sessions can’t keep operating (verify/adjust).
+- Web “My Drafts” filter (like desktop) not finished.
 
-Planned minimal approach:
-- Add `users` table (rep_code, rep_name, password_hash, is_admin, is_active)
-- Session cookie login for web
-- Require auth for mutating actions (eventually)
-- Admin UI: create/disable users, set admin flag
-- Web My Drafts: filter drafts by logged-in rep_code
+## Non‑negotiable rules
+- One step at a time.
+- No manual edits: Steve uploads file → return downloadable replacement with same filename.
+- Never rename files.
+- Windows paths only.
+- GUI layout changes pinned unless explicitly unpinned.
+- Avoid `${ }` inside Python f-strings embedding HTML/JS.
+- For troubleshooting, always collect:
+  1) exact command run
+  2) full traceback
+  3) the crashing file content (last `File "..."` in traceback)
 
-### One-file-at-a-time kickoff
-First file needed to correctly wire migrations/models:
-- `backend/app/database/session.py`
+## Key files (index)
+- `app/main.py` — app setup, session auth, login, `/me`, web admin users UI
+- `app/routes/orders.py` — orders API routes + user-id audit stamping
+- `app/models/orders.py` — Order model + new audit user_id columns
+- `app/models/users.py` — User model (role/is_active/password_hash)
+- `app/database/session.py` / `engine.py` / `base.py` — SQLAlchemy engine/session/Base
+- `alembic/env.py` — Alembic config/metadata
+- `alembic/versions/*` — migrations (including merge migration + audit columns)
+
+## Immediate Next Single Target
+Add a Desktop Admin Users window to `OrderSearchGUI.pyw` (parity with web admin):
+- list/create/enable-disable/set password/set role
+- restrict to admin users only

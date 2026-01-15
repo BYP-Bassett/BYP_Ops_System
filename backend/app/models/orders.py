@@ -52,13 +52,23 @@ class Order(Base):
     # Soft delete + audit
     is_deleted = Column(Boolean, default=False)
     deleted_at = Column(String, nullable=True)
-    deleted_by = Column(String, nullable=True)
+    deleted_by = Column(String, nullable=True)  # legacy (initials/username)
+
+    # NEW: user-id based audit fields (preferred)
+    created_by_user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    updated_by_user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    deleted_by_user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
 
     created_at = Column(String)
 
     updated_at = Column(String, nullable=True)
     # Relationship to SP
     sp = relationship(SPNumber, backref="orders")
+
+    # Optional convenience relationships
+    created_by_user = relationship("User", foreign_keys=[created_by_user_id])
+    updated_by_user = relationship("User", foreign_keys=[updated_by_user_id])
+    deleted_by_user = relationship("User", foreign_keys=[deleted_by_user_id])
 
 
 
