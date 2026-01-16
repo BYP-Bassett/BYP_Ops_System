@@ -156,60 +156,83 @@ def api_login(username: str, password: str, timeout: int = 15) -> bool:
     return bool(me.get("authenticated"))
 
 
-# -----------------------------
-# Dialogs
-# -----------------------------
-class LoginDialog(tk.Toplevel):
-    def __init__(self, parent, prefill_username: str = ""):
-        super().__init__(parent)
-        self.parent = parent
-        self.result = None  # (username, password) or None
 
-        self.title("Login")
-        self.geometry("380x170")
-        self.resizable(False, False)
-        self.transient(parent)
-        self.grab_set()
+def _me_is_admin(me: dict) -> bool:
+    """Best-effort admin detection from /me payload."""
+    if not isinstance(me, dict):
+        return False
+    if me.get("is_admin") is True:
+        return True
+    role = (me.get("role") or "").strip().lower()
+    if role == "admin":
+        return True
+    user = me.get("user")
+    if isinstance(user, dict):
+        if user.get("is_admin") is True:
+            return True
+        role2 = (user.get("role") or "").strip().lower()
+        if role2 == "admin":
+            return True
+    return False
 
-        frm = ttk.Frame(self)
-        frm.pack(fill="both", expand=True, padx=12, pady=12)
 
-        ttk.Label(frm, text="Username").grid(row=0, column=0, sticky="w")
-        self.user_var = tk.StringVar(value=prefill_username or "")
-        user_ent = ttk.Entry(frm, textvariable=self.user_var, width=28)
-        user_ent.grid(row=0, column=1, sticky="w")
+def api_admin_users_list(timeout: int = 12) -> list[dict]:
+    """Admin-only list of users.
 
-        ttk.Label(frm, text="Password").grid(row=1, column=0, sticky="w", pady=(10, 0))
-        self.pass_var = tk.StringVar(value="")
-        pass_ent = ttk.Entry(frm, textvariable=self.pass_var, width=28, show="*")
-        pass_ent.grid(row=1, column=1, sticky="w", pady=(10, 0))
+    Backend variants we've seen:
+      - GET /admin/users?json=1 -> list
+      - GET /admin/users?json=1 -> {"items":[...]} or {"users":[...]} or {"data":[...]}
+      - GET /admin/users with Accept: application/json -> JSON (content-negotiated)
 
-        self.status_var = tk.StringVar(value="")
-        ttk.Label(frm, textvariable=self.status_var).grid(row=2, column=0, columnspan=2, sticky="w", pady=(10, 0))
+    This function is intentionally noisy: it raises on unexpected shapes instead of
+    silently returning [] (the '0 users' lie).
+    """
+    urls = [
+        f"{API_BASE}/admin/users?json=1",
+        f"{API_BASE}/admin/users",
+    ]
 
-        btns = ttk.Frame(self)
-        btns.pack(fill="x", padx=12, pady=(0, 12))
-        self.ok_btn = ttk.Button(btns, text="Login", command=self.on_ok)
-        self.ok_btn.pack(side="left")
-        ttk.Button(btns, text="Cancel", command=self.on_cancel).pack(side="left", padx=(10, 0))
+    last_err = None
+    for url in urls:
+        try:
+            data = http_get_json(url, timeout=timeout)
+        except Exception as e:
+            last_err = e
+            continue
 
-        self.bind("<Return>", lambda _e: self.on_ok())
-        self.bind("<Escape>", lambda _e: self.on_cancel())
+        # Shape A: direct list
+        if isinstance(data, list):
+            return data
 
-        self.after(50, lambda: user_ent.focus_set())
+        # Shape B: dict wrapper
+        if isinstance(data, dict):
+            detail = data.get("detail")
+            if isinstance(detail, str) and detail.strip():
+                raise RuntimeError(detail.strip())
 
-    def on_ok(self):
-        u = (self.user_var.get() or "").strip()
-        p = (self.pass_var.get() or "").strip()
-        if not u or not p:
-            self.status_var.set("Username + password required.")
-            return
-        self.result = (u, p)
-        self.destroy()
+            for k in ("items", "users", "data", "value", "results"):
+                v = data.get(k)
+                if isinstance(v, list):
+                    return v
+                if isinstance(v, dict):
+                    for k2 in ("items", "users", "value", "results", "data"):
+                        v2 = v.get(k2)
+                        if isinstance(v2, list):
+                            return v2
 
-    def on_cancel(self):
-        self.result = None
-        self.destroy()
+            # If *any* dict value is a list-of-dicts, accept it
+            for v in data.values():
+                if isinstance(v, list) and (not v or isinstance(v[0], dict)):
+                    return v
+
+            raise RuntimeError(f"Unexpected JSON shape from {url}")
+
+        raise RuntimeError(f"Unexpected response type from {url}: {type(data).__name__}")
+
+    # If we got here, both URLs failed
+    if last_err is not None:
+        raise RuntimeError(f"Admin users request failed: {last_err}")
+    raise RuntimeError("Admin users request failed.")
 
 
 class FinalizeDialog(tk.Toplevel):
@@ -422,6 +445,11 @@ class NewOrderDialog(tk.Toplevel):
 # -----------------------------
 # Helpers
 # -----------------------------
+
+def api_admin_user_add(payload: dict, timeout: int = 15) -> dict:
+    """POST /admin/users/add (form). Returns {} on non-JSON success; raises on HTTP errors."""
+    return http_post_form(f"{API_BASE}/admin/users/add", payload, timeout=timeout)
+
 def _http_error_to_message(e: HTTPError) -> str:
     try:
         body = e.read().decode("utf-8", errors="replace")
@@ -1258,6 +1286,7 @@ class OrderSearchGUI(tk.Tk):
 
         self.show_order_id = False
 
+        self._is_admin = False
         self._last_items = []
 
         # Load UI preferences (column widths now; column order later)
@@ -1333,6 +1362,7 @@ class OrderSearchGUI(tk.Tk):
                 pass
             return
         # Now safe to load orders.
+        self._refresh_admin_flag()
         try:
             self.run_search(silent=True)
         except Exception:
@@ -1505,6 +1535,7 @@ class OrderSearchGUI(tk.Tk):
         btns_right.pack(side="right")
 
         self.msg_var = tk.StringVar(value="")
+        self._req_id = 0
         ttk.Label(btns_right, textvariable=self.msg_var).pack(side="right")
 
         self.delete_btn = ttk.Button(btns_right, text="Delete", command=self._ctx_delete)
@@ -1512,6 +1543,8 @@ class OrderSearchGUI(tk.Tk):
 
         self.show_id_btn = ttk.Button(btns_right, text="Show Order ID", command=self.enable_order_id_column)
         self.show_id_btn.pack(side="right", padx=(0, 10))
+        self.admin_btn = ttk.Button(btns_right, text="Admin", command=self.open_admin_users, state="disabled")
+        self.admin_btn.pack(side="right", padx=(0, 10))
 
         # Tree
         cols = self._tree_columns()
@@ -1769,6 +1802,31 @@ class OrderSearchGUI(tk.Tk):
         except Exception as e:
             messagebox.showerror("Open failed", str(e))
 
+
+    def _refresh_admin_flag(self):
+        """Refresh admin flag from /me and enable/disable Admin button."""
+        try:
+            me = api_me(timeout=8)
+        except Exception:
+            me = {}
+        self._is_admin = _me_is_admin(me)
+        try:
+            if self._is_admin:
+                self.admin_btn.configure(state="normal")
+            else:
+                self.admin_btn.configure(state="disabled")
+        except Exception:
+            pass
+
+    def open_admin_users(self):
+        if not self._is_admin:
+            messagebox.showerror("Not allowed", "Admin access required.")
+            return
+        try:
+            AdminUsersWindow(self)
+        except Exception as e:
+            messagebox.showerror("Admin", str(e))
+
     def _init_context_menu(self):
         # Context menu for the search grid
         self._rc_menu = tk.Menu(self, tearoff=0)
@@ -1928,6 +1986,207 @@ class OrderSearchGUI(tk.Tk):
     def _after_ctx_delete_fail(self, msg: str):
         self.msg_var.set("Delete failed.")
         messagebox.showerror("Delete failed", msg)
+
+
+
+
+class AdminUsersWindow(tk.Toplevel):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.parent = parent
+        self.title('Admin — Users')
+        self.geometry('760x520')
+        self.resizable(True, True)
+
+        self.msg_var = tk.StringVar(value='')
+        self._req_id = 0
+        self._build_ui()
+        self.refresh()
+
+    def _build_ui(self):
+        # Top bar
+        top = ttk.Frame(self)
+        top.pack(fill="x", padx=10, pady=10)
+
+        ttk.Button(top, text="Refresh", command=self.refresh).pack(side="left")
+        ttk.Label(top, textvariable=self.msg_var).pack(side="right")
+
+        # Add User card
+        add_card = ttk.LabelFrame(self, text="Add User")
+        add_card.pack(fill="x", padx=10, pady=(0, 10))
+
+        row = ttk.Frame(add_card)
+        row.pack(fill="x", padx=10, pady=10)
+
+        self.add_username = tk.StringVar(value="")
+        self.add_rep_code = tk.StringVar(value="")
+        self.add_rep_name = tk.StringVar(value="")
+        self.add_email = tk.StringVar(value="")
+        self.add_role = tk.StringVar(value="user")
+        self.add_password = tk.StringVar(value="")
+
+        def field(parent, label, var, width=18, show=None):
+            frm = ttk.Frame(parent)
+            ttk.Label(frm, text=label).pack(anchor="w")
+            ent = ttk.Entry(frm, textvariable=var, width=width, show=show) if show else ttk.Entry(frm, textvariable=var, width=width)
+            ent.pack(anchor="w", pady=(2, 0))
+            return frm
+
+        f1 = field(row, "Username", self.add_username, width=18)
+        f2 = field(row, "Rep Code", self.add_rep_code, width=10)
+        f3 = field(row, "Rep Name", self.add_rep_name, width=26)
+        f4 = field(row, "Email (optional)", self.add_email, width=28)
+
+        f5 = ttk.Frame(row)
+        ttk.Label(f5, text="Role").pack(anchor="w")
+        role_cb = ttk.Combobox(f5, textvariable=self.add_role, values=["user", "admin"], width=10, state="readonly")
+        role_cb.pack(anchor="w", pady=(2, 0))
+
+        f6 = field(row, "Password", self.add_password, width=20)
+
+        for w in (f1, f2, f3, f4, f5, f6):
+            w.pack(side="left", padx=(0, 10))
+
+        btns = ttk.Frame(add_card)
+        btns.pack(fill="x", padx=10, pady=(0, 10))
+
+        self.add_btn = ttk.Button(btns, text="Add", command=self._on_add_user)
+        self.add_btn.pack(side="left")
+
+        ttk.Label(btns, text="Passwords are bootstrapped as plain:<password> for now (same as web).", foreground="#555").pack(side="left", padx=12)
+
+        # Users table
+        cols = ("id", "username", "rep_code", "rep_name", "email", "role", "active")
+        self.tree = ttk.Treeview(self, columns=cols, show="headings", height=18)
+        for c in cols:
+            self.tree.heading(c, text=c)
+            w = 120
+            if c in ("username", "rep_name"):
+                w = 180
+            if c == "id":
+                w = 60
+            if c in ("rep_code", "role", "active"):
+                w = 90
+            if c == "email":
+                w = 220
+            self.tree.column(c, width=w, anchor="w")
+        self.tree.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+
+    def _on_add_user(self):
+        username = (self.add_username.get() or "").strip()
+        rep_code = (self.add_rep_code.get() or "").strip()
+        rep_name = (self.add_rep_name.get() or "").strip()
+        email = (self.add_email.get() or "").strip()
+        role = (self.add_role.get() or "user").strip()
+        password = (self.add_password.get() or "").strip()
+
+        if not username:
+            messagebox.showerror("Add User", "Username is required.", parent=self)
+            return
+        if role not in ("user", "admin"):
+            messagebox.showerror("Add User", "Role must be user or admin.", parent=self)
+            return
+
+        payload = {
+            "username": username,
+            "rep_code": rep_code,
+            "rep_name": rep_name,
+            "email": email,
+            "role": role,
+            "password": password,
+        }
+
+        self.add_btn.configure(state="disabled")
+        self.msg_var.set("Adding...")
+
+        def done_ok():
+            self.add_btn.configure(state="normal")
+            self.add_password.set("")
+            self.msg_var.set("Added.")
+            self.refresh()
+
+        def done_fail(msg: str):
+            self.add_btn.configure(state="normal")
+            self.msg_var.set("Failed.")
+            messagebox.showerror("Add User", msg, parent=self)
+
+        def worker():
+            try:
+                api_admin_user_add(payload, timeout=15)
+                self.after(0, done_ok)
+            except HTTPError as e:
+                self.after(0, lambda: done_fail(_http_error_to_message(e)))
+            except Exception as e:
+                self.after(0, lambda: done_fail(str(e)))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def refresh(self):
+        # Request token so old responses don't clobber new UI state.
+        self._req_id += 1
+        req_id = self._req_id
+
+        self.msg_var.set('Loading...')
+
+        def fail(msg: str):
+            if self._req_id != req_id:
+                return
+            self.msg_var.set('Failed.')
+            messagebox.showerror('Admin users', msg, parent=self)
+
+        def apply(users: list[dict]):
+            if self._req_id != req_id:
+                return
+            self._apply(users)
+
+        def watchdog():
+            if self._req_id != req_id:
+                return
+            if str(self.msg_var.get()).startswith('Loading'):
+                fail('Timed out loading users. The server endpoint /admin/users is not responding.')
+
+        self.after(16000, watchdog)
+
+        def worker():
+            try:
+                users = api_admin_users_list(timeout=12)
+                self.after(0, lambda: apply(users))
+            except HTTPError as e:
+                self.after(0, lambda: fail(_http_error_to_message(e)))
+            except Exception as e:
+                self.after(0, lambda: fail(str(e)))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _apply(self, users: list[dict]):
+        for iid in self.tree.get_children():
+            self.tree.delete(iid)
+
+        if not isinstance(users, list):
+            users = []
+
+        count = 0
+        for i, u in enumerate(users):
+            if not isinstance(u, dict):
+                continue
+            uid = str(u.get("id") or u.get("user_id") or "")
+            username = str(u.get("username") or u.get("user") or "")
+            rep_code = str(u.get("rep_code") or "")
+            rep_name = str(u.get("rep_name") or "")
+            email = str(u.get("email") or "")
+            role = str(u.get("role") or "")
+            active_val = u.get("is_active")
+            if active_val is None:
+                active_val = u.get("active")
+            active = "yes" if active_val else "no"
+
+            self.tree.insert("", "end", iid=f"u{i}", values=(uid, username, rep_code, rep_name, email, role, active))
+            count += 1
+
+        self.msg_var.set(f"{count} user(s)")
+    def _fail(self, msg: str):
+        self.msg_var.set('Failed.')
+        messagebox.showerror('Admin users', msg, parent=self)
 
 
 def main():

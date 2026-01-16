@@ -314,15 +314,49 @@ def _html_escape(s: str) -> str:
 # ---- Admin: Users page ----
 @app.get("/admin/users", include_in_schema=False)
 def admin_users_page(request: Request, msg: str | None = None, err: str | None = None):
-    gate = _require_admin_or_redirect(request)
-    if gate is not None:
-        return gate
+    # JSON mode for desktop/admin tooling: /admin/users?json=1
+    accept = (request.headers.get("accept") or "").lower()
+    wants_json = (request.query_params.get("json") == "1")
+    if not wants_json and "application/json" in accept and "text/html" not in accept:
+        wants_json = True
+
+    if wants_json:
+        # Return API-style errors instead of redirects.
+        if not _is_logged_in(request):
+            return JSONResponse(status_code=401, content={"detail": "Not authenticated"})
+        if not _is_admin(request):
+            return JSONResponse(status_code=403, content={"detail": "Not authorized"})
+    else:
+        gate = _require_admin_or_redirect(request)
+        if gate is not None:
+            return gate
 
     db = SessionLocal()
     try:
         users = db.query(User).order_by(User.id.asc()).all()
     finally:
         db.close()
+    if wants_json:
+        items = []
+        for u in users:
+            # Keep keys stable for desktop tooling.
+            item = {
+                "id": getattr(u, "id", None),
+                "username": getattr(u, "username", ""),
+                "rep_code": getattr(u, "rep_code", "") or "",
+                "rep_name": getattr(u, "rep_name", "") or "",
+                "email": getattr(u, "email", "") or "",
+                "role": getattr(u, "role", "user") or "user",
+                "is_active": bool(getattr(u, "is_active", True)),
+            }
+            # Optional timestamps if present
+            if hasattr(u, "created_at"):
+                item["created_at"] = str(getattr(u, "created_at") or "")
+            if hasattr(u, "updated_at"):
+                item["updated_at"] = str(getattr(u, "updated_at") or "")
+            items.append(item)
+        return JSONResponse(content=items)
+
 
     rows = []
     for u in users:
