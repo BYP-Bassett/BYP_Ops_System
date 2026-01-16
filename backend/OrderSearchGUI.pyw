@@ -450,6 +450,14 @@ def api_admin_user_add(payload: dict, timeout: int = 15) -> dict:
     """POST /admin/users/add (form). Returns {} on non-JSON success; raises on HTTP errors."""
     return http_post_form(f"{API_BASE}/admin/users/add", payload, timeout=timeout)
 
+
+def api_admin_user_toggle_active(user_id: str, timeout: int = 15) -> dict:
+    """POST /admin/users/{id}/toggle_active (form)."""
+    user_id = str(user_id).strip()
+    if not user_id:
+        raise RuntimeError("Missing user id")
+    return http_post_form(f"{API_BASE}/admin/users/{user_id}/toggle_active", {}, timeout=timeout)
+
 def _http_error_to_message(e: HTTPError) -> str:
     try:
         body = e.read().decode("utf-8", errors="replace")
@@ -2070,7 +2078,15 @@ class AdminUsersWindow(tk.Toplevel):
             if c == "email":
                 w = 220
             self.tree.column(c, width=w, anchor="w")
+        actions = ttk.Frame(self)
+        actions.pack(side="bottom", fill="x", padx=10, pady=(0, 10))
+
+        self.toggle_active_btn = ttk.Button(actions, text="Disable/Enable", command=self._on_toggle_active, state="disabled")
+        self.toggle_active_btn.pack(side="left")
+
+        self.tree.bind("<<TreeviewSelect>>", self._on_user_select)
         self.tree.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+
 
     def _on_add_user(self):
         username = (self.add_username.get() or "").strip()
@@ -2113,6 +2129,65 @@ class AdminUsersWindow(tk.Toplevel):
         def worker():
             try:
                 api_admin_user_add(payload, timeout=15)
+                self.after(0, done_ok)
+            except HTTPError as e:
+                self.after(0, lambda: done_fail(_http_error_to_message(e)))
+            except Exception as e:
+                self.after(0, lambda: done_fail(str(e)))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+
+    def _on_user_select(self, event=None):
+        try:
+            sel = self.tree.selection()
+            if not sel:
+                self.toggle_active_btn.configure(state="disabled", text="Disable/Enable")
+                return
+            iid = sel[0]
+            vals = self.tree.item(iid, "values") or ()
+            active = ""
+            if len(vals) >= 7:
+                active = str(vals[6]).strip().lower()
+            if active == "yes":
+                self.toggle_active_btn.configure(state="normal", text="Disable user")
+            elif active == "no":
+                self.toggle_active_btn.configure(state="normal", text="Enable user")
+            else:
+                self.toggle_active_btn.configure(state="normal", text="Disable/Enable")
+        except Exception:
+            try:
+                self.toggle_active_btn.configure(state="disabled", text="Disable/Enable")
+            except Exception:
+                pass
+
+    def _on_toggle_active(self):
+        sel = self.tree.selection()
+        if not sel:
+            messagebox.showerror("User", "Select a user first.", parent=self)
+            return
+        iid = sel[0]
+        vals = self.tree.item(iid, "values") or ()
+        user_id = str(vals[0]) if len(vals) >= 1 else ""
+        if not user_id:
+            messagebox.showerror("User", "Missing user id.", parent=self)
+            return
+
+        self.toggle_active_btn.configure(state="disabled")
+        self.msg_var.set("Updating...")
+
+        def done_ok():
+            self.msg_var.set("Updated.")
+            self.refresh()
+
+        def done_fail(msg: str):
+            self.msg_var.set("Failed.")
+            messagebox.showerror("Toggle Active", msg, parent=self)
+            self._on_user_select()
+
+        def worker():
+            try:
+                api_admin_user_toggle_active(user_id, timeout=15)
                 self.after(0, done_ok)
             except HTTPError as e:
                 self.after(0, lambda: done_fail(_http_error_to_message(e)))
@@ -2184,6 +2259,7 @@ class AdminUsersWindow(tk.Toplevel):
             count += 1
 
         self.msg_var.set(f"{count} user(s)")
+        self._on_user_select()
     def _fail(self, msg: str):
         self.msg_var.set('Failed.')
         messagebox.showerror('Admin users', msg, parent=self)
@@ -2196,4 +2272,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
