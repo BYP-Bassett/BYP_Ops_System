@@ -16,6 +16,7 @@ from app.services.trello_service import (
     create_checklist_on_card,
     ensure_sp_checklist,
     find_list_id_by_name,
+    rebuild_order_checklist,
 )
 
 
@@ -195,7 +196,19 @@ def finalize_order(
             created = create_card_in_list(list_id=list_id, name=title, desc=desc or None)
             card_id = created["id"]
 
-        if not checklist_id:
+        # IMPORTANT: if we're finalizing a draft that already has a Trello checklist linked
+        # (common after Override Edit), we must rebuild the checklist so Trello matches the
+        # updated notes. For radio/video, checklist name must be the SP#.
+        if checklist_id:
+            if not sp_number:
+                raise RuntimeError("Cannot rebuild Trello checklist: SP number missing for this order.")
+            checklist_id = rebuild_order_checklist(
+                card_id=card_id,
+                old_checklist_id=checklist_id,
+                checklist_name=sp_number,
+                notes=getattr(order, "notes", None),
+            )
+        else:
             if not sp_number:
                 raise RuntimeError("Cannot create Trello checklist: SP number missing for this order.")
             checklist_id = ensure_sp_checklist(
@@ -224,10 +237,21 @@ def finalize_order(
             created = create_card_in_list(list_id=list_id, name=title, desc=desc or None)
             card_id = created["id"]
 
-        if not checklist_id:
-            now = datetime.now()
-            checklist_name = _art_checklist_name(db=db, order=order, now=now)
-            items = _notes_to_items_local(getattr(order, "notes", None))
+        # For ART, checklist name is MMDDYY-R# based on finalized siblings of the same root.
+        # If we already have a checklist linked (e.g., after Override Edit), rebuild it so the
+        # items reflect the updated notes.
+        now = datetime.now()
+        checklist_name = _art_checklist_name(db=db, order=order, now=now)
+        items = _notes_to_items_local(getattr(order, "notes", None))
+
+        if checklist_id:
+            checklist_id = rebuild_order_checklist(
+                card_id=card_id,
+                old_checklist_id=checklist_id,
+                checklist_name=checklist_name,
+                notes=getattr(order, "notes", None),
+            )
+        else:
             checklist_id = create_checklist_on_card(card_id=card_id, name=checklist_name, items=items)
 
     else:

@@ -9,7 +9,6 @@
 from __future__ import annotations
 
 import json
-import re
 from pathlib import Path
 import os
 import threading
@@ -98,30 +97,6 @@ def http_get_json(url: str, timeout: int = 10) -> dict:
         _save_cookies()
         return data
 
-
-
-
-def http_get_text(url: str, timeout: int = 10) -> str:
-    """Fetch raw text (used when endpoints return HTML)."""
-    req = Request(url, headers={"Accept": "*/*"})
-    with _OPENER.open(req, timeout=timeout) as resp:
-        raw = resp.read().decode("utf-8", errors="replace")
-        _save_cookies()
-        return raw
-
-
-def http_post_form_nojson(url: str, form: dict, timeout: int = 15) -> str:
-    """POST x-www-form-urlencoded and return raw text (tolerates HTML responses)."""
-    headers = {
-        "Accept": "*/*",
-        "Content-Type": "application/x-www-form-urlencoded",
-    }
-    data = urlencode(form).encode("utf-8")
-    req = Request(url, data=data, headers=headers, method="POST")
-    with _OPENER.open(req, timeout=timeout) as resp:
-        raw = resp.read().decode("utf-8", errors="replace")
-        _save_cookies()
-        return raw
 
 def http_send_json(method: str, url: str, payload: dict | None, timeout: int = 15) -> dict:
     headers = {"Accept": "application/json"}
@@ -476,10 +451,28 @@ class OrderDetailsWindow(tk.Toplevel):
         self._override_mode = False
         self._asset_type_editable = False
 
+
+        # Autosave guardrails
+        self._dirty = False
+        self._suspend_dirty = False
+        self._autosave_after_id = None
+        self._autosave_delay_ms = 800
+        self._baseline = {
+            "artist": "",
+            "asset_type": "",
+            "client_name": "",
+            "client_company_name": "",
+            "rep_name": "",
+            "notes": "",
+        }
+
         self.title(f"Order {order_id}")
         self.geometry("980x760")
+        self.protocol("WM_DELETE_WINDOW", self._on_window_close)
+
 
         self._build_ui()
+        self._wire_autosave()
         self.refresh()
 
     def _build_ui(self):
@@ -519,7 +512,6 @@ class OrderDetailsWindow(tk.Toplevel):
 
         self.finalize_btn = ttk.Button(actions, text="Finalize", command=self.on_finalize)
         self.finalize_btn.pack(side="left", padx=(8, 0))
-
 
         ttk.Separator(self, orient="horizontal").pack(fill="x", padx=10, pady=(0, 8))
 
@@ -631,6 +623,7 @@ class OrderDetailsWindow(tk.Toplevel):
 
     def _apply_order(self, data: dict):
         self.order_data = data
+        self._suspend_dirty = True
         status = (data.get("status") or "").strip().lower()
         sp = data.get("sp") or {}
 
@@ -668,6 +661,10 @@ class OrderDetailsWindow(tk.Toplevel):
         self.notes_text.configure(state="normal")
         self.notes_text.delete("1.0", "end")
         self.notes_text.insert("1.0", data.get("notes") or "")
+        try:
+            self.notes_text.edit_modified(False)
+        except Exception:
+            pass
         self.notes_text.configure(state="disabled")
 
         is_addl = False
@@ -686,6 +683,205 @@ class OrderDetailsWindow(tk.Toplevel):
         self.edit_btn.configure(state=("normal" if status == "finalized" else "disabled"))
         self.save_btn.configure(state=("normal" if editable else "disabled"))
         self.delete_btn.configure(state="normal")  # delete allowed for both (with double bump for finalized)
+
+        # Baseline for dirty tracking (autosave)
+        self._baseline = self._collect_draft()
+        self._dirty = False
+        self._cancel_autosave()
+        self._suspend_dirty = False
+
+    # ---------- Autosave (desktop) ----------
+    def _collect_draft(self) -> dict:
+        """Snapshot current editable fields in a normalized form."""
+        notes = ""
+        try:
+            notes = (self.notes_text.get("1.0", "end") or "").strip()
+        except Exception:
+            notes = ""
+
+        rep_var = self.vars.get("Rep", (tk.StringVar(value=REP_FULL[0]), None))[0]
+        return {
+            "artist": (self.vars["Artist"][0].get() or "").strip(),
+            "asset_type": (self.vars["Asset Type"][0].get() or "").strip().lower(),
+            "client_name": (self.vars["Client Name"][0].get() or "").strip(),
+            "client_company_name": (self.vars["Client Company"][0].get() or "").strip(),
+            "rep_name": (rep_var.get() or REP_FULL[0]).strip(),
+            "notes": notes,
+        }
+
+    def _is_dirty(self) -> bool:
+        try:
+            return self._collect_draft() != (self._baseline or {})
+        except Exception:
+            return True
+
+    def _cancel_autosave(self):
+        try:
+            if self._autosave_after_id is not None:
+                self.after_cancel(self._autosave_after_id)
+        except Exception:
+            pass
+        self._autosave_after_id = None
+
+    def _mark_dirty(self):
+        if self._suspend_dirty:
+            return
+        self._dirty = True
+        self._schedule_autosave()
+
+    def _schedule_autosave(self):
+        # Don't autosave when it's read-only.
+        if not self.order_data:
+            return
+        status = (self.order_data.get("status") or "").strip().lower()
+        if status == "finalized":
+            return
+
+        # If nothing actually changed, don't spam saves.
+        if not self._is_dirty():
+            self._dirty = False
+            return
+
+        self._cancel_autosave()
+        self._autosave_after_id = self.after(self._autosave_delay_ms, self._autosave_now)
+
+    def _build_save_payload(self):
+        d = self._collect_draft()
+        at = d.get("asset_type", "")
+        if at not in ("radio", "video", "art"):
+            # Silent fail: keep dirty so user can fix.
+            self.status_var.set("Fix Asset Type (radio/video/art) before saving.")
+            return None
+        return {
+            "artist": d["artist"],
+            "notes": d["notes"],
+            "client_name": d["client_name"] or None,
+            "client_company_name": d["client_company_name"] or None,
+            "rep_name": d["rep_name"],
+            "asset_type": at,
+        }
+
+    def _autosave_now(self, close_after: bool = False, after_success=None):
+        """Save quietly. If close_after=True, only close on success."""
+        self._cancel_autosave()
+
+        if not self.order_data:
+            if callable(after_success):
+                after_success()
+            if close_after:
+                try:
+                    self.destroy()
+                except Exception:
+                    pass
+            return
+
+        # Re-check dirtiness at execution time.
+        if not self._is_dirty():
+            self._dirty = False
+            if callable(after_success):
+                after_success()
+            if close_after:
+                try:
+                    self.destroy()
+                except Exception:
+                    pass
+            return
+
+        payload = self._build_save_payload()
+        if payload is None:
+            # Invalid data; don't close.
+            if close_after:
+                messagebox.showerror("Can't close yet", "Fix the Asset Type first, then try again.")
+            return
+
+        self.status_var.set("Auto-saving…")
+        self.save_btn.configure(state="disabled")
+
+        def api_fn():
+            return http_patch_json(f"{API_BASE}/orders/{self.order_id}", payload=payload, timeout=30)
+
+        def on_ok(updated):
+            # Best effort refresh, but don't pop dialogs.
+            self.save_btn.configure(state="normal")
+            self._override_mode = False
+            self._asset_type_editable = False
+            try:
+                fresh = http_get_json(f"{API_BASE}/orders/{self.order_id}", timeout=15)
+            except Exception:
+                fresh = updated
+            self._apply_order(fresh)
+            self.status_var.set("Saved.")
+            if callable(after_success):
+                after_success()
+            if close_after:
+                try:
+                    self.destroy()
+                except Exception:
+                    pass
+
+        def on_fail(msg):
+            self.save_btn.configure(state="normal")
+            self.status_var.set("Auto-save failed.")
+            if close_after:
+                messagebox.showerror("Auto-save failed", msg)
+
+        if hasattr(self.parent, "_call_api_with_auth"):
+            self.parent._call_api_with_auth(self, api_fn, on_ok, on_fail)
+        else:
+            def worker():
+                try:
+                    updated = api_fn()
+                    self.after(0, lambda: on_ok(updated))
+                except HTTPError as e:
+                    self.after(0, lambda: on_fail(_http_error_to_message(e)))
+                except Exception as e:
+                    self.after(0, lambda: on_fail(str(e)))
+            threading.Thread(target=worker, daemon=True).start()
+
+    def _wire_autosave(self):
+        # Track edits to the few fields users can change.
+        watch_keys = ["Artist", "Asset Type", "Client Name", "Client Company"]
+        for k in watch_keys:
+            try:
+                self.vars[k][0].trace_add("write", lambda *a: self._mark_dirty())
+            except Exception:
+                pass
+
+        # Rep dropdown (if present)
+        try:
+            self.vars["Rep"][0].trace_add("write", lambda *a: self._mark_dirty())
+        except Exception:
+            pass
+
+        # Notes (Text widget)
+        def on_notes_modified(event=None):
+            if self._suspend_dirty:
+                try:
+                    self.notes_text.edit_modified(False)
+                except Exception:
+                    pass
+                return
+            try:
+                if self.notes_text.edit_modified():
+                    self.notes_text.edit_modified(False)
+                    self._mark_dirty()
+            except Exception:
+                pass
+
+        try:
+            self.notes_text.bind("<<Modified>>", on_notes_modified)
+        except Exception:
+            pass
+
+    def _on_window_close(self):
+        # Don't silently drop edits. Save first, then close.
+        if self.order_data and self._is_dirty():
+            self._autosave_now(close_after=True)
+        else:
+            try:
+                self.destroy()
+            except Exception:
+                pass
 
     def on_new(self):
         NewOrderDialog(self.parent, prefill={"artist": self.vars["Artist"][0].get(), "asset_type": self.vars["Asset Type"][0].get()})
@@ -778,6 +974,12 @@ class OrderDetailsWindow(tk.Toplevel):
 
     def on_finalize(self):
         if not self.order_data:
+            return
+
+        # Guardrail: if user changed anything, save it first.
+        if self._is_dirty():
+            # On finalize, a save failure should be loud.
+            self._autosave_now(silent=False, after_success=lambda: self.after(0, self.on_finalize))
             return
 
         status = (self.order_data.get("status") or "").strip().lower()
@@ -1014,506 +1216,6 @@ class OrderDetailsWindow(tk.Toplevel):
         messagebox.showerror("Delete failed", msg)
 
 
-
-# -----------------------------
-# Desktop Admin Users (parity with web /admin/users)
-# -----------------------------
-from html.parser import HTMLParser
-
-class _SimpleTableParser(HTMLParser):
-    # Very small HTML table parser: returns rows of cell text for the FIRST table found.
-    def __init__(self):
-        super().__init__()
-        self.in_table = False
-        self.in_tr = False
-        self.in_cell = False
-        self._cell_buf = []
-        self.rows = []
-        self._current_row = []
-        self._table_depth = 0
-
-    def handle_starttag(self, tag, attrs):
-        t = tag.lower()
-        if t == "table":
-            if not self.in_table:
-                self.in_table = True
-                self._table_depth = 1
-            else:
-                self._table_depth += 1
-        if not self.in_table:
-            return
-        if t == "tr":
-            self.in_tr = True
-            self._current_row = []
-        if t in ("td", "th") and self.in_tr:
-            self.in_cell = True
-            self._cell_buf = []
-
-    def handle_endtag(self, tag):
-        t = tag.lower()
-        if self.in_table and t == "table":
-            self._table_depth -= 1
-            if self._table_depth <= 0:
-                self.in_table = False
-        if not self.in_table:
-            return
-        if t in ("td", "th") and self.in_tr and self.in_cell:
-            txt = "".join(self._cell_buf).strip()
-            self._current_row.append(re.sub(r"\s+", " ", txt))
-            self.in_cell = False
-            self._cell_buf = []
-        if t == "tr" and self.in_tr:
-            if self._current_row:
-                self.rows.append(self._current_row)
-            self.in_tr = False
-            self._current_row = []
-
-    def handle_data(self, data):
-        if self.in_table and self.in_cell and self.in_tr:
-            self._cell_buf.append(data)
-
-
-def _headers_to_keys(headers: list[str]) -> list[str]:
-    keys = []
-    for h in headers:
-        s = (h or "").strip().lower()
-        s = re.sub(r"[^a-z0-9]+", "_", s).strip("_")
-        if s in ("active", "enabled"):
-            s = "is_active"
-        if s in ("user", "name"):
-            s = "username"
-        keys.append(s or "col")
-    return keys
-
-
-def _try_parse_users_from_html(html_text: str) -> list[dict]:
-    p = _SimpleTableParser()
-    try:
-        p.feed(html_text or "")
-    except Exception:
-        return []
-    rows = p.rows or []
-    if len(rows) < 2:
-        return []
-    headers = rows[0]
-    keys = _headers_to_keys(headers)
-    out = []
-    for r in rows[1:]:
-        d = {}
-        for i, cell in enumerate(r):
-            k = keys[i] if i < len(keys) else f"col_{i}"
-            d[k] = cell
-        out.append(d)
-    return out
-
-
-class AddUserDialog(tk.Toplevel):
-    def __init__(self, parent):
-        super().__init__(parent)
-        self.parent = parent
-        self.result = None  # dict
-
-        self.title("Add User")
-        self.geometry("520x260")
-        self.resizable(False, False)
-        self.transient(parent)
-        self.grab_set()
-
-        frm = ttk.Frame(self)
-        frm.pack(fill="both", expand=True, padx=12, pady=12)
-
-        self.username_var = tk.StringVar()
-        self.password_var = tk.StringVar()
-        self.rep_code_var = tk.StringVar()
-        self.rep_name_var = tk.StringVar()
-        self.role_var = tk.StringVar(value="user")
-        self.active_var = tk.BooleanVar(value=True)
-
-        def row(r, label, widget):
-            ttk.Label(frm, text=label).grid(row=r, column=0, sticky="w", pady=6)
-            widget.grid(row=r, column=1, sticky="w", pady=6)
-
-        row(0, "Username", ttk.Entry(frm, textvariable=self.username_var, width=26))
-        row(1, "Password", ttk.Entry(frm, textvariable=self.password_var, width=26, show="*"))
-        row(2, "Rep Code", ttk.Entry(frm, textvariable=self.rep_code_var, width=10))
-        row(3, "Rep Name", ttk.Entry(frm, textvariable=self.rep_name_var, width=34))
-
-        role_cb = ttk.Combobox(frm, textvariable=self.role_var, values=["user", "admin"], state="readonly", width=10)
-        row(4, "Role", role_cb)
-
-        ttk.Checkbutton(frm, text="Active", variable=self.active_var).grid(row=4, column=1, sticky="e", pady=6)
-
-        self.status_var = tk.StringVar(value="")
-        ttk.Label(frm, textvariable=self.status_var).grid(row=5, column=0, columnspan=2, sticky="w", pady=(10, 0))
-
-        btns = ttk.Frame(self)
-        btns.pack(fill="x", padx=12, pady=(0, 12))
-        ttk.Button(btns, text="Create", command=self.on_ok).pack(side="left")
-        ttk.Button(btns, text="Cancel", command=self.on_cancel).pack(side="left", padx=(10, 0))
-
-        self.bind("<Escape>", lambda _e: self.on_cancel())
-
-    def on_ok(self):
-        u = (self.username_var.get() or "").strip()
-        p = (self.password_var.get() or "").strip()
-        if not u or not p:
-            self.status_var.set("Username + password required.")
-            return
-        self.result = {
-            "username": u,
-            "password": p,
-            "rep_code": (self.rep_code_var.get() or "").strip().upper() or None,
-            "rep_name": (self.rep_name_var.get() or "").strip() or None,
-            "role": (self.role_var.get() or "user").strip().lower(),
-            "is_active": bool(self.active_var.get()),
-        }
-        self.destroy()
-
-    def on_cancel(self):
-        self.result = None
-        self.destroy()
-
-
-class AdminUsersWindow(tk.Toplevel):
-    def __init__(self, parent: "OrderSearchGUI"):
-        super().__init__(parent)
-        self.parent = parent
-        self.title("Admin — Users")
-        self.geometry("860x520")
-        self.resizable(True, True)
-
-        self.status_var = tk.StringVar(value="Ready.")
-        self._build_ui()
-        self.refresh()
-
-    def _build_ui(self):
-        top = ttk.Frame(self)
-        top.pack(fill="x", padx=10, pady=10)
-
-        ttk.Label(top, textvariable=self.status_var).pack(side="left")
-
-        btns = ttk.Frame(top)
-        btns.pack(side="right")
-
-        ttk.Button(btns, text="Refresh", command=self.refresh).pack(side="left")
-        ttk.Button(btns, text="Add User", command=self.on_add).pack(side="left", padx=(8, 0))
-        ttk.Button(btns, text="Set Password", command=self.on_set_password).pack(side="left", padx=(8, 0))
-        ttk.Button(btns, text="Toggle Active", command=self.on_toggle_active).pack(side="left", padx=(8, 0))
-        ttk.Button(btns, text="Set Role", command=self.on_set_role).pack(side="left", padx=(8, 0))
-
-        cols = ["id", "username", "rep_code", "rep_name", "role", "is_active"]
-        self.tree = ttk.Treeview(self, columns=cols, show="headings", height=18, selectmode="browse")
-        for c in cols:
-            self.tree.heading(c, text=c)
-            if c == "rep_name":
-                self.tree.column(c, width=220, anchor="w")
-            elif c == "username":
-                self.tree.column(c, width=160, anchor="w")
-            elif c == "id":
-                self.tree.column(c, width=60, anchor="e")
-            elif c == "is_active":
-                self.tree.column(c, width=80, anchor="center")
-            else:
-                self.tree.column(c, width=110, anchor="w")
-        self.tree.pack(fill="both", expand=True, padx=10, pady=(0, 10))
-
-    def _require_admin(self) -> bool:
-        try:
-            me = api_me(timeout=8)
-            if isinstance(me, dict) and me.get("authenticated") and (me.get("role") or "").lower() == "admin":
-                return True
-        except Exception:
-            pass
-        messagebox.showerror("Not allowed", "Admin only.", parent=self)
-        return False
-
-    def _fetch_users(self) -> list[dict]:
-        json_urls = [
-            f"{API_BASE}/admin/users/list",
-            f"{API_BASE}/admin/users?json=1",
-            f"{API_BASE}/admin/users?format=json",
-            f"{API_BASE}/admin/users/json",
-            f"{API_BASE}/admin/users.json",
-            f"{API_BASE}/admin/api/users",
-        ]
-        for u in json_urls:
-            try:
-                data = http_get_json(u, timeout=20)
-                if isinstance(data, list):
-                    return data
-                if isinstance(data, dict):
-                    for k in ("users", "items", "data", "value"):
-                        if isinstance(data.get(k), list):
-                            return data.get(k)
-            except Exception:
-                continue
-
-        try:
-            html_text = http_get_text(f"{API_BASE}/admin/users", timeout=20)
-            return _try_parse_users_from_html(html_text)
-        except Exception:
-            return []
-
-    def refresh(self):
-        if not self._require_admin():
-            self.destroy()
-            return
-
-        self.status_var.set("Loading…")
-
-        def worker():
-            try:
-                users = self._fetch_users()
-                self.after(0, lambda: self._apply(users))
-            except Exception as e:
-                self.after(0, lambda: self._fail(str(e)))
-
-        threading.Thread(target=worker, daemon=True).start()
-
-    def _fail(self, msg: str):
-        self.status_var.set("Failed.")
-        messagebox.showerror("Admin users failed", msg, parent=self)
-
-    def _apply(self, users: list[dict]):
-        for iid in self.tree.get_children():
-            self.tree.delete(iid)
-
-        def pick(d, *keys, default=""):
-            for k in keys:
-                if isinstance(d, dict) and k in d and d.get(k) is not None:
-                    return d.get(k)
-            return default
-
-        for u in users or []:
-            uid = pick(u, "id", "user_id", "uid", default="")
-            username = pick(u, "username", "user", "name", default="")
-            rep_code = pick(u, "rep_code", default="")
-            rep_name = pick(u, "rep_name", default="")
-            role = pick(u, "role", default="")
-            active = pick(u, "is_active", "active", "enabled", default="")
-
-            if isinstance(active, bool):
-                active_disp = "yes" if active else "no"
-            else:
-                s = str(active).strip().lower()
-                if s in ("true", "1", "yes", "y", "active", "enabled"):
-                    active_disp = "yes"
-                elif s in ("false", "0", "no", "n", "disabled", "inactive"):
-                    active_disp = "no"
-                else:
-                    active_disp = str(active)
-
-            vals = [uid, username, rep_code, rep_name, role, active_disp]
-            self.tree.insert("", "end", values=vals)
-
-        self.status_var.set(f"{len(users or [])} user(s).")
-
-    def _selected_user(self):
-        sel = self.tree.selection()
-        if not sel:
-            return None
-        vals = self.tree.item(sel[0], "values") or []
-        return {
-            "id": vals[0] if len(vals) > 0 else "",
-            "username": vals[1] if len(vals) > 1 else "",
-            "rep_code": vals[2] if len(vals) > 2 else "",
-            "rep_name": vals[3] if len(vals) > 3 else "",
-            "role": vals[4] if len(vals) > 4 else "",
-            "is_active": vals[5] if len(vals) > 5 else "",
-        }
-
-    def on_add(self):
-        if not self._require_admin():
-            return
-        dlg = AddUserDialog(self)
-        self.wait_window(dlg)
-        if not getattr(dlg, "result", None):
-            return
-        payload = dlg.result
-
-        self.status_var.set("Creating…")
-
-        def worker():
-            try:
-                try_urls = [f"{API_BASE}/admin/users", f"{API_BASE}/admin/users/create", f"{API_BASE}/admin/api/users"]
-                created_ok = False
-                last_err = None
-                for u in try_urls:
-                    try:
-                        http_post_json(u, payload=payload, timeout=25)
-                        created_ok = True
-                        break
-                    except Exception as e:
-                        last_err = e
-                        continue
-                if not created_ok:
-                    form = {k: ("" if v is None else str(v)) for k, v in payload.items()}
-                    for u in try_urls:
-                        try:
-                            http_post_form_nojson(u, form=form, timeout=25)
-                            created_ok = True
-                            break
-                        except Exception as e:
-                            last_err = e
-                            continue
-                if not created_ok:
-                    raise Exception(last_err or "Create failed")
-                self.after(0, self.refresh)
-            except Exception as e:
-                self.after(0, lambda: self._fail(str(e)))
-
-        threading.Thread(target=worker, daemon=True).start()
-
-    def on_set_password(self):
-        if not self._require_admin():
-            return
-        u = self._selected_user()
-        if not u:
-            messagebox.showerror("No selection", "Select a user first.", parent=self)
-            return
-        new_pw = simpledialog.askstring("Set password", f"New password for {u.get('username')}:", show="*", parent=self)
-        if not new_pw:
-            return
-
-        self.status_var.set("Updating password…")
-
-        def worker():
-            try:
-                uid = str(u.get("id") or "").strip()
-                if not uid:
-                    raise Exception("Missing user id (can't set password).")
-                payload = {"password": new_pw}
-                urls = [
-                    f"{API_BASE}/admin/users/{uid}/password",
-                    f"{API_BASE}/admin/users/{uid}/set_password",
-                    f"{API_BASE}/admin/api/users/{uid}/password",
-                ]
-                ok = False
-                last_err = None
-                for url in urls:
-                    try:
-                        http_post_json(url, payload=payload, timeout=25)
-                        ok = True
-                        break
-                    except Exception as e:
-                        last_err = e
-                if not ok:
-                    form = {"password": new_pw}
-                    for url in urls:
-                        try:
-                            http_post_form_nojson(url, form=form, timeout=25)
-                            ok = True
-                            break
-                        except Exception as e:
-                            last_err = e
-                if not ok:
-                    raise Exception(last_err or "Password update failed")
-                self.after(0, self.refresh)
-            except Exception as e:
-                self.after(0, lambda: self._fail(str(e)))
-
-        threading.Thread(target=worker, daemon=True).start()
-
-    def on_toggle_active(self):
-        if not self._require_admin():
-            return
-        u = self._selected_user()
-        if not u:
-            messagebox.showerror("No selection", "Select a user first.", parent=self)
-            return
-        uid = str(u.get("id") or "").strip()
-        if not uid:
-            messagebox.showerror("Missing id", "Missing user id (can't update).", parent=self)
-            return
-
-        self.status_var.set("Toggling…")
-
-        def worker():
-            try:
-                urls = [
-                    f"{API_BASE}/admin/users/{uid}/toggle",
-                    f"{API_BASE}/admin/users/{uid}/toggle_active",
-                    f"{API_BASE}/admin/api/users/{uid}/toggle",
-                ]
-                ok = False
-                last_err = None
-                for url in urls:
-                    try:
-                        http_post_json(url, payload=None, timeout=25)
-                        ok = True
-                        break
-                    except Exception as e:
-                        last_err = e
-                if not ok:
-                    current = (u.get("is_active") or "").strip().lower()
-                    new_val = not (current in ("yes", "true", "1", "y", "active", "enabled"))
-                    try:
-                        http_patch_json(f"{API_BASE}/admin/users/{uid}", payload={"is_active": new_val}, timeout=25)
-                        ok = True
-                    except Exception as e:
-                        last_err = e
-                if not ok:
-                    raise Exception(last_err or "Toggle failed")
-                self.after(0, self.refresh)
-            except Exception as e:
-                self.after(0, lambda: self._fail(str(e)))
-
-        threading.Thread(target=worker, daemon=True).start()
-
-    def on_set_role(self):
-        if not self._require_admin():
-            return
-        u = self._selected_user()
-        if not u:
-            messagebox.showerror("No selection", "Select a user first.", parent=self)
-            return
-        uid = str(u.get("id") or "").strip()
-        if not uid:
-            messagebox.showerror("Missing id", "Missing user id (can't update).", parent=self)
-            return
-
-        role = simpledialog.askstring("Set role", "Role (admin or user):", initialvalue=str(u.get("role") or "user"), parent=self)
-        if not role:
-            return
-        role = role.strip().lower()
-        if role not in ("admin", "user"):
-            messagebox.showerror("Bad role", "Role must be 'admin' or 'user'.", parent=self)
-            return
-
-        self.status_var.set("Updating role…")
-
-        def worker():
-            try:
-                payload = {"role": role}
-                urls = [
-                    f"{API_BASE}/admin/users/{uid}/role",
-                    f"{API_BASE}/admin/users/{uid}/set_role",
-                    f"{API_BASE}/admin/api/users/{uid}/role",
-                ]
-                ok = False
-                last_err = None
-                for url in urls:
-                    try:
-                        http_post_json(url, payload=payload, timeout=25)
-                        ok = True
-                        break
-                    except Exception as e:
-                        last_err = e
-                if not ok:
-                    try:
-                        http_patch_json(f"{API_BASE}/admin/users/{uid}", payload=payload, timeout=25)
-                        ok = True
-                    except Exception as e:
-                        last_err = e
-                if not ok:
-                    raise Exception(last_err or "Role update failed")
-                self.after(0, self.refresh)
-            except Exception as e:
-                self.after(0, lambda: self._fail(str(e)))
-
-        threading.Thread(target=worker, daemon=True).start()
-
-
 # -----------------------------
 # Search GUI
 # -----------------------------
@@ -1521,7 +1223,6 @@ class OrderSearchGUI(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("BYP Ops — Orders")
-        self._me = {}
 
         # Default size (overridden if we have a saved window geometry)
         default_geometry = "1080x720"
@@ -1582,8 +1283,6 @@ class OrderSearchGUI(tk.Tk):
             if not force:
                 me = api_me(timeout=8)
                 if isinstance(me, dict) and me.get("authenticated"):
-                    self._me = me
-                    self._apply_me_to_ui()
                     return True
         except Exception:
             pass
@@ -1611,16 +1310,6 @@ class OrderSearchGUI(tk.Tk):
             messagebox.showerror("Login failed", "Bad username/password (or server didn't set session).", parent=parent_window or self)
             return False
 
-        # Refresh /me so role-based UI (e.g., Admin Users) can render immediately.
-        try:
-            me = api_me(timeout=8)
-            if isinstance(me, dict) and me.get("authenticated"):
-                self._me = me
-                self._apply_me_to_ui()
-        except Exception:
-            pass
-
-
         # Persist last username
         try:
             prefs["last_username"] = (username or "").strip().lower()
@@ -1628,58 +1317,6 @@ class OrderSearchGUI(tk.Tk):
             self._save_prefs(prefs)
         except Exception:
             pass
-
-        return True
-
-
-
-    def _apply_me_to_ui(self):
-        """Show/hide admin UI based on current /me."""
-        me = getattr(self, "_me", {}) or {}
-        role = (me.get("role") or "").strip().lower()
-
-        if not hasattr(self, "admin_btn"):
-            return
-
-        opts = getattr(self, "_admin_btn_pack_opts", {"side": "right", "padx": (0, 10)})
-
-        try:
-            if role == "admin":
-                if not getattr(self, "_admin_btn_visible", False):
-                    try:
-                        self.admin_btn.pack(**opts)
-                    except Exception:
-                        self.admin_btn.pack(side="right", padx=(0, 10))
-                    self._admin_btn_visible = True
-                self.admin_btn.configure(state="normal")
-            else:
-                try:
-                    self.admin_btn.pack_forget()
-                except Exception:
-                    pass
-                self._admin_btn_visible = False
-        except Exception:
-            # UI nicety only; never crash for this.
-            pass
-
-    def on_admin_users(self):
-        """Open the Admin Users window (admin only)."""
-        try:
-            me = api_me(timeout=8)
-            if isinstance(me, dict) and me.get("authenticated"):
-                self._me = me
-                self._apply_me_to_ui()
-                if (me.get("role") or "").lower() != "admin":
-                    messagebox.showerror("Not allowed", "Admin only.", parent=self)
-                    return
-        except Exception as e:
-            messagebox.showerror("Not allowed", f"Admin check failed: {e}", parent=self)
-            return
-
-        try:
-            AdminUsersWindow(self)
-        except Exception as e:
-            messagebox.showerror("Admin", f"Failed to open Admin Users window: {e}", parent=self)
 
         return True
 
@@ -1876,14 +1513,6 @@ class OrderSearchGUI(tk.Tk):
         self.show_id_btn = ttk.Button(btns_right, text="Show Order ID", command=self.enable_order_id_column)
         self.show_id_btn.pack(side="right", padx=(0, 10))
 
-        # Admin Users (admin-only)
-        self.admin_btn = ttk.Button(btns_right, text="Admin Users", command=self.on_admin_users)
-        # Start hidden; visibility toggled after /me.
-        self.admin_btn.pack(side="right", padx=(0, 10))
-        self.admin_btn.pack_forget()
-        self._admin_btn_visible = False
-        self._admin_btn_pack_opts = {"side": "right", "padx": (0, 10)}
-
         # Tree
         cols = self._tree_columns()
         self.tree = ttk.Treeview(self, columns=cols, show="headings", height=22, selectmode="extended")
@@ -2030,9 +1659,6 @@ class OrderSearchGUI(tk.Tk):
         # Confidential: require login before any order data is fetched
         try:
             me = api_me(timeout=8)
-            if isinstance(me, dict) and me.get('authenticated'):
-                self._me = me
-                self._apply_me_to_ui()
             if not (isinstance(me, dict) and me.get('authenticated')):
                 ok = self.ensure_login(parent_window=self, force=False)
                 if not ok:

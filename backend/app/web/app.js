@@ -735,4 +735,157 @@ createBtn.addEventListener("click", create);
       if (e && e.persisted) runSearch(false);
     } catch (_) {}
   });
+
+  // ---- Order detail helpers: Auto-save on Back (web) ----
+  // This file is also loaded on the order detail page. We don't assume IDs
+  // never change, so this is defensive and only activates when an order form
+  // is present.
+  (function enableOrderAutoSaveOnBack() {
+    try {
+      // Detect an order detail form.
+      const form =
+        document.querySelector('form#orderForm') ||
+        document.querySelector('form[data-order-form]') ||
+        document.querySelector('form[action*="/orders/"]') ||
+        null;
+
+      if (!form) return; // not on order page
+
+      // Track dirty state for any input/select/textarea inside the form.
+      let isDirty = false;
+      const markDirty = () => { isDirty = true; };
+
+      const fields = form.querySelectorAll('input, select, textarea');
+      for (let i = 0; i < fields.length; i++) {
+        fields[i].addEventListener('input', markDirty, { passive: true });
+        fields[i].addEventListener('change', markDirty, { passive: true });
+      }
+
+      // Expose tiny hooks so the order page can cooperate without tight coupling.
+      window.BYPOps = window.BYPOps || {};
+      window.BYPOps.orderIsDirty = () => !!isDirty;
+      window.BYPOps._markOrderClean = () => { isDirty = false; };
+
+      // Try to locate a Back button/link.
+      const byId = (id) => document.getElementById(id);
+      const backBtn =
+        byId('backBtn') ||
+        byId('backButton') ||
+        byId('btnBack') ||
+        document.querySelector('[data-action="back"]') ||
+        (function findBackByText() {
+          const btns = document.querySelectorAll('button, a');
+          for (let j = 0; j < btns.length; j++) {
+            const t = (btns[j].textContent || '').trim().toLowerCase();
+            if (t === 'back' || t === '← back' || t === 'back to search') return btns[j];
+          }
+          return null;
+        })();
+
+      if (!backBtn) {
+        // No explicit Back button found. Still warn on unload if dirty.
+        window.addEventListener('beforeunload', (e) => {
+          try {
+            if (!isDirty) return;
+            e.preventDefault();
+            e.returnValue = '';
+          } catch (_) {}
+        });
+        return;
+      }
+
+      // Identify the save function the order page already uses.
+      function getSaveFn() {
+        try {
+          if (window.BYPOps && typeof window.BYPOps.saveOrder === 'function') return window.BYPOps.saveOrder;
+          if (typeof window.saveOrder === 'function') return window.saveOrder;
+          if (typeof window.onSave === 'function') return window.onSave;
+        } catch (_) {}
+        return null;
+      }
+
+      // Attempt to show errors somewhere sane.
+      function showSaveError(msg) {
+        try {
+          const el = document.getElementById('saveError') || document.getElementById('error') || null;
+          if (el) {
+            el.textContent = msg;
+            return;
+          }
+        } catch (_) {}
+        try { alert(msg); } catch (_) {}
+      }
+
+      async function saveThenGoBack(ev) {
+        try {
+          if (!isDirty) return; // nothing to do
+
+          const saveFn = getSaveFn();
+          if (!saveFn) {
+            // Can't autosave without a save function; at least warn.
+            showSaveError('Unsaved changes. No save handler found for auto-save. Click Save first.');
+            ev.preventDefault();
+            ev.stopPropagation();
+            return;
+          }
+
+          ev.preventDefault();
+          ev.stopPropagation();
+
+          // Lock UI while saving
+          const prevDisabled = !!backBtn.disabled;
+          backBtn.disabled = true;
+
+          let ok = false;
+          try {
+            const res = await saveFn();
+            // Accept: true/false, {ok:true}, or undefined (assume ok if no exception)
+            ok = (res === undefined) ? true : (!!res && (res.ok === undefined ? true : !!res.ok));
+          } catch (e) {
+            ok = false;
+            showSaveError((e && e.message) ? e.message : String(e));
+          }
+
+          backBtn.disabled = prevDisabled;
+
+          if (!ok) {
+            // stay put
+            return;
+          }
+
+          // Mark clean and navigate.
+          isDirty = false;
+
+          // If it's a link, preserve its intent; otherwise just history.back().
+          try {
+            if (backBtn.tagName === 'A') {
+              const href = backBtn.getAttribute('href');
+              if (href) {
+                window.location.href = href;
+                return;
+              }
+            }
+          } catch (_) {}
+
+          try { window.history.back(); } catch (_) { window.location.href = '/'; }
+        } catch (_) {
+          // ignore
+        }
+      }
+
+      // Capture-phase handler so we beat any existing click logic that navigates.
+      backBtn.addEventListener('click', saveThenGoBack, true);
+
+      // Native back/refresh/tab-close: we can't reliably async save here, so warn.
+      window.addEventListener('beforeunload', (e) => {
+        try {
+          if (!isDirty) return;
+          e.preventDefault();
+          e.returnValue = '';
+        } catch (_) {}
+      });
+    } catch (_) {
+      // no-op
+    }
+  })();
 })();

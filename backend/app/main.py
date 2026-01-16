@@ -4,9 +4,12 @@ import os
 import hmac
 import hashlib
 import base64
+import json
+import urllib.parse
+import urllib.request
 from pathlib import Path
 
-from fastapi import FastAPI, Form, Request, Body, HTTPException
+from fastapi import FastAPI, Form, Request
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
@@ -115,15 +118,8 @@ async def _auth_session_guard(request: Request, call_next):
             if (not user) or (not bool(getattr(user, "is_active", True))):
                 _clear_session(request)
 
-                # Decide whether to respond like an API (401 JSON) or like a browser (303 to /login).
-                # Desktop callers usually send Accept: */* (or application/json). Browser navigations usually include text/html.
-                accept = (request.headers.get("accept") or "").lower()
-                wants_html = ("text/html" in accept) and ("application/json" not in accept)
-
-                is_api_path = path.startswith("/orders") or path.startswith("/admin") or path == "/me"
-
-                # API endpoints (desktop + fetch calls) should get a hard 401.
-                if is_api_path and not wants_html:
+                # API endpoints (desktop + web JS fetches) should get a hard 401.
+                if path.startswith("/orders") or path == "/me":
                     return JSONResponse(status_code=401, content={"detail": "Not authenticated"})
 
                 # Browser pages redirect to login.
@@ -163,6 +159,41 @@ def me(request: Request):
         "role": request.session.get("role"),
         "is_active": request.session.get("is_active"),
     }
+
+
+@app.get("/trello/card-url/{card_id}")
+def trello_card_url(card_id: str, request: Request):
+    # Must be logged in (same as the web UI)
+    user = get_current_user_from_session(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+
+    key = os.environ.get("TRELLO_KEY")
+    token = os.environ.get("TRELLO_TOKEN")
+    if not key or not token:
+        raise HTTPException(status_code=500, detail="Trello not configured (missing TRELLO_KEY/TRELLO_TOKEN)")
+
+    # Use Trello API to get a real usable URL (shortUrl is best).
+    params = {
+        "fields": "shortUrl,url",
+        "key": key,
+        "token": token,
+    }
+    api_url = "https://api.trello.com/1/cards/" + urllib.parse.quote(card_id) + "?" + urllib.parse.urlencode(params)
+
+    try:
+        req = urllib.request.Request(api_url, headers={"Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=12) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+        data = json.loads(raw)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Trello lookup failed: {e}")
+
+    url = (data or {}).get("shortUrl") or (data or {}).get("url")
+    if not url:
+        raise HTTPException(status_code=502, detail="Trello lookup failed: missing url")
+
+    return {"url": url}
 
 
 @app.get("/login", include_in_schema=False)
@@ -280,238 +311,12 @@ def _html_escape(s: str) -> str:
     )
 
 
-# ---- Admin JSON API (for Desktop Admin Users parity) ----
-def _require_admin_or_401(request: Request) -> None:
-    if not _is_logged_in(request):
-        raise HTTPException(status_code=401, detail="Not authenticated")
-    if not _is_admin(request):
-        raise HTTPException(status_code=403, detail="Admin only")
-
-
-def _user_to_dict(u: User) -> dict:
-    d = {
-        "id": int(getattr(u, "id")),
-        "username": str(getattr(u, "username") or ""),
-        "rep_code": str(getattr(u, "rep_code") or ""),
-        "rep_name": str(getattr(u, "rep_name") or ""),
-        "role": str(getattr(u, "role") or "user"),
-        "is_active": bool(getattr(u, "is_active", True)),
-    }
-    # Optional email field if model supports it
-    if hasattr(u, "email"):
-        try:
-            d["email"] = str(getattr(u, "email") or "")
-        except Exception:
-            d["email"] = ""
-    return d
-
-
-def _list_users() -> list[dict]:
-    db = SessionLocal()
-    try:
-        users = db.query(User).order_by(User.id.asc()).all()
-        return [_user_to_dict(u) for u in users]
-    finally:
-        db.close()
-
-
-@app.get("/admin/users/list", include_in_schema=False)
-def admin_users_list(request: Request):
-    _require_admin_or_401(request)
-    return {"users": _list_users()}
-
-
-@app.get("/admin/users/json", include_in_schema=False)
-def admin_users_json(request: Request):
-    _require_admin_or_401(request)
-    return {"users": _list_users()}
-
-
-@app.get("/admin/users.json", include_in_schema=False)
-def admin_users_json_dot(request: Request):
-    _require_admin_or_401(request)
-    return {"users": _list_users()}
-
-
-@app.get("/admin/api/users", include_in_schema=False)
-def admin_api_users_list(request: Request):
-    _require_admin_or_401(request)
-    return {"users": _list_users()}
-
-
-@app.post("/admin/users", include_in_schema=False)
-def admin_users_create_json(request: Request, payload: dict = Body(...)):
-    _require_admin_or_401(request)
-
-    u = (str(payload.get("username") or "")).strip().lower()
-    pw = (str(payload.get("password") or "")).strip()
-    if not u:
-        raise HTTPException(status_code=400, detail="username required")
-    if not pw:
-        raise HTTPException(status_code=400, detail="password required")
-
-    rc = (str(payload.get("rep_code") or "")).strip()
-    rn = (str(payload.get("rep_name") or "")).strip()
-    role = (str(payload.get("role") or "user")).strip().lower()
-    if role not in ("user", "admin"):
-        role = "user"
-    is_active = bool(payload.get("is_active", True))
-    email = (str(payload.get("email") or "")).strip()
-
-    db = SessionLocal()
-    try:
-        existing = db.query(User).filter(User.username == u).first()
-        if existing:
-            raise HTTPException(status_code=409, detail="username already exists")
-
-        new_user = User(
-            username=u,
-            rep_code=rc,
-            rep_name=rn,
-            role=role,
-            is_active=is_active,
-            password_hash="plain:" + pw,
-        )
-        if hasattr(new_user, "email"):
-            try:
-                setattr(new_user, "email", email)
-            except Exception:
-                pass
-
-        db.add(new_user)
-        db.commit()
-        db.refresh(new_user)
-        return {"status": "ok", "user": _user_to_dict(new_user)}
-    except HTTPException:
-        db.rollback()
-        raise
-    except Exception as e:
-        db.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        db.close()
-
-
-@app.post("/admin/users/create", include_in_schema=False)
-def admin_users_create_alias(request: Request, payload: dict = Body(...)):
-    # Alias for desktop callers
-    return admin_users_create_json(request, payload)
-
-
-@app.post("/admin/api/users", include_in_schema=False)
-def admin_api_users_create(request: Request, payload: dict = Body(...)):
-    # Alias for desktop callers
-    return admin_users_create_json(request, payload)
-
-
-@app.patch("/admin/users/{user_id}", include_in_schema=False)
-def admin_users_patch(request: Request, user_id: int, payload: dict = Body(...)):
-    _require_admin_or_401(request)
-    db = SessionLocal()
-    try:
-        user = db.query(User).filter(User.id == int(user_id)).first()
-        if not user:
-            raise HTTPException(status_code=404, detail="user not found")
-
-        if "role" in payload:
-            role = (str(payload.get("role") or "user")).strip().lower()
-            if role not in ("user", "admin"):
-                role = "user"
-            setattr(user, "role", role)
-
-        if "is_active" in payload:
-            setattr(user, "is_active", bool(payload.get("is_active")))
-
-        if "rep_code" in payload:
-            setattr(user, "rep_code", (str(payload.get("rep_code") or "")).strip())
-
-        if "rep_name" in payload:
-            setattr(user, "rep_name", (str(payload.get("rep_name") or "")).strip())
-
-        if "email" in payload and hasattr(user, "email"):
-            try:
-                setattr(user, "email", (str(payload.get("email") or "")).strip())
-            except Exception:
-                pass
-
-        db.commit()
-        db.refresh(user)
-        return {"status": "ok", "user": _user_to_dict(user)}
-    except HTTPException:
-        db.rollback()
-        raise
-    except Exception as e:
-        db.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        db.close()
-
-
-@app.post("/admin/users/{user_id}/password", include_in_schema=False)
-def admin_users_set_password_json(request: Request, user_id: int, payload: dict = Body(...)):
-    _require_admin_or_401(request)
-    pw = (str(payload.get("password") or "")).strip()
-    if not pw:
-        raise HTTPException(status_code=400, detail="password required")
-
-    db = SessionLocal()
-    try:
-        user = db.query(User).filter(User.id == int(user_id)).first()
-        if not user:
-            raise HTTPException(status_code=404, detail="user not found")
-        setattr(user, "password_hash", "plain:" + pw)
-        db.commit()
-        return {"status": "ok"}
-    except HTTPException:
-        db.rollback()
-        raise
-    except Exception as e:
-        db.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        db.close()
-
-
-@app.post("/admin/users/{user_id}/role", include_in_schema=False)
-def admin_users_set_role_json(request: Request, user_id: int, payload: dict = Body(...)):
-    _require_admin_or_401(request)
-    role = (str(payload.get("role") or "user")).strip().lower()
-    if role not in ("admin", "user"):
-        raise HTTPException(status_code=400, detail="role must be admin or user")
-    return admin_users_patch(request, user_id, {"role": role})
-
-
-@app.post("/admin/users/{user_id}/toggle", include_in_schema=False)
-def admin_users_toggle_json(request: Request, user_id: int):
-    _require_admin_or_401(request)
-    db = SessionLocal()
-    try:
-        user = db.query(User).filter(User.id == int(user_id)).first()
-        if not user:
-            raise HTTPException(status_code=404, detail="user not found")
-        cur = bool(getattr(user, "is_active", True))
-        setattr(user, "is_active", (not cur))
-        db.commit()
-        db.refresh(user)
-        return {"status": "ok", "user": _user_to_dict(user)}
-    except HTTPException:
-        db.rollback()
-        raise
-    except Exception as e:
-        db.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        db.close()
-
 # ---- Admin: Users page ----
 @app.get("/admin/users", include_in_schema=False)
-def admin_users_page(request: Request, msg: str | None = None, err: str | None = None, json: int | None = None, format: str | None = None):
+def admin_users_page(request: Request, msg: str | None = None, err: str | None = None):
     gate = _require_admin_or_redirect(request)
     if gate is not None:
         return gate
-
-    if (json is not None and int(json) == 1) or (str(format or '').strip().lower() == 'json'):
-        return JSONResponse(content={"users": _list_users()})
 
     db = SessionLocal()
     try:
@@ -950,6 +755,7 @@ def web_order_detail(request: Request, order_id: int):
   <div class="bar">
     <button id="backBtn">← Back</button>
     <a class="muted" href="/orders/__ORDER_ID__" target="_blank" rel="noopener">Open JSON</a>
+    <button id="openTrelloBtn" type="button" disabled>Open Trello Card</button>
 
     <span class="muted">Parent:</span>
     <span class="copywrap">
@@ -1018,6 +824,10 @@ def web_order_detail(request: Request, order_id: int):
       var unfinalizeBtn = document.getElementById("unfinalizeBtn");
       var reviseBtn = document.getElementById("reviseBtn");
       var addlBtn = document.getElementById("addlBtn");
+      var openTrelloBtn = document.getElementById("openTrelloBtn");
+
+      var trelloCardId = "";
+
 
 
       var deleteBtn = document.getElementById("deleteBtn");
@@ -1045,11 +855,68 @@ var orderRows = document.getElementById("orderRows");
         client_name: "",
         client_company_name: ""
       };
+      // Autosave state
+      var autoSaveTimer = null;
+      var autoSaveDelayMs = 900;
+      var isDraftNow = false;
+      var isSaving = false;
+      var hasLoadedOnce = false;
 
       document.getElementById("backBtn").addEventListener("click", function() {
         // Always go back to main search.
-        window.location.href = "/";
+        ensureSavedThen(function() {
+          window.location.href = "/";
+        });
       });
+
+      // Warn if user tries to bail with unsaved changes still pending.
+      window.addEventListener("beforeunload", function(e) {
+        if (!hasLoadedOnce) return;
+        if (isDirty() || isSaving) {
+          e.preventDefault();
+          e.returnValue = "";
+          return "";
+        }
+      });
+
+      if (openTrelloBtn) openTrelloBtn.addEventListener("click", function() {
+        clearMsgs();
+        if (!trelloCardId) {
+          errEl.textContent = "No Trello card linked on this order.";
+          return;
+        }
+        setBusy("Opening Trello…");
+        fetch("/trello/card-url/" + encodeURIComponent(trelloCardId), { credentials: "same-origin" })
+          .then(function(res) {
+            return res.text().then(function(text) {
+              if (res.status === 401 || res.status === 403 || (res.redirected && String(res.url).indexOf("/login") >= 0)) {
+                window.location.href = "/login";
+                return null;
+              }
+	              if (!res.ok) {
+	                setBusy("");
+	                // main.py renders this HTML from a Python string; newline escapes must be double-escaped.
+	                errEl.textContent = "HTTP " + res.status + "\\n" + text;
+	                return null;
+	              }
+              try { return JSON.parse(text); } catch (e) {
+                setBusy("");
+	                errEl.textContent = "Bad JSON\\n" + text;
+                return null;
+              }
+            });
+          })
+          .then(function(data) {
+            setBusy("");
+            if (!data || !data.url) return;
+            window.open(String(data.url), "_blank", "noopener");
+          })
+          .catch(function(e) {
+            setBusy("");
+            errEl.textContent = String(e);
+          });
+      });
+
 
       function esc(s) {
         var v = (s === null || s === undefined) ? "" : String(s);
@@ -1265,6 +1132,32 @@ var orderRows = document.getElementById("orderRows");
         resetBtn.disabled = !dirty;
       }
 
+      function scheduleAutoSave() {
+        if (!hasLoadedOnce) return;
+        if (!isDraftNow) return;
+        if (!isDirty()) return;
+        if (autoSaveTimer) clearTimeout(autoSaveTimer);
+        autoSaveTimer = setTimeout(function() {
+          saveAsync(true);
+        }, autoSaveDelayMs);
+      }
+
+      function ensureSavedThen(fn) {
+        // If we're not dirty, just go.
+        if (!hasLoadedOnce || !isDirty()) {
+          fn();
+          return;
+        }
+        // If user is editing a non-draft, don't silently spam the API.
+        if (!isDraftNow) {
+          errEl.textContent = "This order isn't in DRAFT. Use Override Edit first.";
+          return;
+        }
+        saveAsync(false).then(function(ok) {
+          if (ok) fn();
+        });
+      }
+
       function setBusy(msg) {
         statusEl.textContent = msg || "";
       }
@@ -1281,9 +1174,16 @@ var orderRows = document.getElementById("orderRows");
         unfinalizeBtn.disabled = disabled || unfinalizeBtn.disabled;
       }
 
-      function save() {
+      function saveAsync(quiet) {
         clearMsgs();
-        setBusy("Saving…");
+        if (isSaving) return Promise.resolve(false);
+        if (!isDraftNow) {
+          if (!quiet) errEl.textContent = "This order isn't in DRAFT. Use Override Edit first.";
+          return Promise.resolve(false);
+        }
+
+        isSaving = true;
+        setBusy(quiet ? "Autosaving…" : "Saving…");
         saveBtn.disabled = true;
 
         var d = getDraft();
@@ -1298,7 +1198,8 @@ var orderRows = document.getElementById("orderRows");
           payload.asset_type = d.asset_type;
         }
 
-        fetch("/orders/" + ORDER_ID, {
+        return fetch("/orders/" + ORDER_ID, {
+          credentials: "same-origin",
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload)
@@ -1309,23 +1210,38 @@ var orderRows = document.getElementById("orderRows");
               setBusy("");
               errEl.textContent = "HTTP " + res.status + "\\n" + text;
               refreshDirtyUI();
-              return null;
+              return false;
             }
-            okEl.textContent = "Saved.";
+
+            // Update baseline locally so closing/finalizing won't lose changes.
+            baseline = {
+              asset_type: d.asset_type,
+              notes: d.notes,
+              client_name: d.client_name,
+              client_company_name: d.client_company_name
+            };
+
+            okEl.textContent = quiet ? "Autosaved." : "Saved.";
+            refreshDirtyUI();
+            hasLoadedOnce = true;
+            setBusy("Loaded.");
             return true;
           });
-        })
-        .then(function(ok) {
-          if (ok) load(); // reload to show updated_at + any server-side normalization
         })
         .catch(function(e) {
           setBusy("");
           errEl.textContent = String(e);
           refreshDirtyUI();
+          return false;
+        })
+        .finally(function() {
+          isSaving = false;
         });
       }
 
-      saveBtn.addEventListener("click", save);
+      saveBtn.addEventListener("click", function() {
+        saveAsync(false);
+      });
 
       resetBtn.addEventListener("click", function() {
         clearMsgs();
@@ -1341,7 +1257,7 @@ var orderRows = document.getElementById("orderRows");
         finalizeBtn.disabled = true;
         unfinalizeBtn.disabled = true;
 
-        fetch(path, { method: "POST" })
+        fetch(path, { method: "POST", credentials: "same-origin" })
           .then(function(res) {
             return res.text().then(function(text) {
               if (!res.ok) {
@@ -1377,7 +1293,7 @@ var orderRows = document.getElementById("orderRows");
         finalizeBtn.disabled = true;
         unfinalizeBtn.disabled = true;
 
-        fetch(path, { method: "POST" })
+        fetch(path, { method: "POST", credentials: "same-origin" })
           .then(function(res) {
             return res.text().then(function(text) {
               if (!res.ok) {
@@ -1399,15 +1315,21 @@ var orderRows = document.getElementById("orderRows");
       }
 
       reviseBtn.addEventListener("click", function() {
-        postAndGo("/orders/" + ORDER_ID + "/revise");
+        ensureSavedThen(function() {
+          postAndGo("/orders/" + ORDER_ID + "/revise");
+        });
       });
 
       addlBtn.addEventListener("click", function() {
-        postAndGo("/orders/" + ORDER_ID + "/addl_vers");
+        ensureSavedThen(function() {
+          postAndGo("/orders/" + ORDER_ID + "/addl_vers");
+        });
       });
 
       finalizeBtn.addEventListener("click", function() {
-        postAndReload("/orders/" + ORDER_ID + "/finalize", "Finalized.");
+        ensureSavedThen(function() {
+          postAndReload("/orders/" + ORDER_ID + "/finalize", "Finalized.");
+        });
       });
 
       unfinalizeBtn.addEventListener("click", function() {
@@ -1449,7 +1371,7 @@ var orderRows = document.getElementById("orderRows");
         var url = "/orders/" + ORDER_ID + "?initials=" + encodeURIComponent(initials);
         if (isFinal) url += "&force=true";
 
-        fetch(url, { method: "DELETE" })
+        fetch(url, { method: "DELETE", credentials: "same-origin" })
           .then(function(res) {
             return res.text().then(function(text) {
               if (!res.ok) {
@@ -1475,7 +1397,7 @@ function load() {
         clearMsgs();
         setBusy("Fetching…");
 
-        fetch("/orders/" + ORDER_ID)
+        fetch("/orders/" + ORDER_ID, { credentials: "same-origin" })
           .then(function(res) {
             return res.text().then(function(text) {
               if (!res.ok) {
@@ -1496,6 +1418,12 @@ function load() {
             if (!data) return;
 
             currentData = data;
+
+            // Trello quick-open
+            trelloCardId = normalize(data.trello_card_id);
+            if (openTrelloBtn) {
+              openTrelloBtn.disabled = !trelloCardId;
+            }
 
             rawJsonEl.textContent = JSON.stringify(data, null, 2);
 
@@ -1571,10 +1499,14 @@ function load() {
             };
             setDraftFromBaseline();
 
+            // Initial payload loaded - enable unload guards + autosave scheduling.
+            hasLoadedOnce = true;
+
             // Wire dirty tracking
             function onChange() {
               okEl.textContent = "";
               refreshDirtyUI();
+              scheduleAutoSave();
             }
             if (assetTypeSelect) assetTypeSelect.addEventListener("change", onChange);
             notesInput.addEventListener("input", onChange);
@@ -1589,15 +1521,17 @@ function load() {
               deleteBtn.disabled = !!data.is_deleted;
             }
 
-            // Asset Type editable only when draft
+            // Editable only when draft
             var isDraft = false;
             if (data && data.status) {
               var ds = String(data.status).toLowerCase();
               if (ds.indexOf("draft") >= 0) isDraft = true;
             }
-            if (assetTypeSelect) {
-              assetTypeSelect.disabled = !isDraft;
-            }
+            isDraftNow = isDraft;
+            if (assetTypeSelect) assetTypeSelect.disabled = !isDraft;
+            if (notesInput) notesInput.disabled = !isDraft;
+            if (clientNameInput) clientNameInput.disabled = !isDraft;
+            if (clientCompanyInput) clientCompanyInput.disabled = !isDraft;
 
             // Finalize/Unfinalize: best-effort based on finalized_at or status text
             var isFinal = false;

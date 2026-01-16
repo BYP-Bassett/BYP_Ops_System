@@ -803,6 +803,33 @@ def duplicate_order(
 
     return new_order
 
+
+
+@router.get("/deleted", response_model=OrderSearchResponse)
+def list_deleted_orders(
+    request: Request,
+    db: Session = Depends(get_db),
+    limit: int = Query(default=200, ge=1, le=1000, description="Max rows to return (pagination)."),
+    offset: int = Query(default=0, ge=0, description="Rows to skip (pagination)."),
+    session_user: dict = Depends(require_admin),
+):
+    """Admin-only: list soft-deleted orders (newest first)."""
+    q = (
+        db.query(Order)
+        .options(joinedload(Order.sp))
+        .filter(Order.deleted_at.isnot(None))
+    )
+
+    total = q.order_by(None).count()
+    items = (
+        q.order_by(Order.id.desc())
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
+    return {"total": total, "items": items}
+
+
 @router.get("/{order_id}", response_model=OrderResponse)
 def get_order(
     request: Request,
@@ -830,6 +857,77 @@ def get_order(
     # FM-style convenience label (non-editable)
     order.parent_display = _parent_display(order)
 
+    return order
+
+
+
+
+@router.post("/{order_id}/restore", response_model=OrderResponse)
+def restore_deleted_order(
+    request: Request,
+    order_id: int,
+    db: Session = Depends(get_db),
+    session_user: dict = Depends(require_admin),
+    initials: str | None = Query(default=None, description="Your initials for audit log (optional)."),
+):
+    """Admin-only: restore a soft-deleted order. This is idempotent."""
+    order = (
+        db.query(Order)
+        .options(joinedload(Order.sp))
+        .filter(Order.id == order_id)
+        .first()
+    )
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    # If it's not deleted, treat as a no-op.
+    if not getattr(order, "is_deleted", False) and getattr(order, "deleted_at", None) is None:
+        order.parent_display = _parent_display(order)
+        return order
+
+    before = _order_snapshot(order)
+
+    # Clear soft-delete flags
+    try:
+        order.is_deleted = False
+    except Exception:
+        pass
+    try:
+        order.deleted_at = None
+    except Exception:
+        pass
+    try:
+        order.deleted_by = None
+    except Exception:
+        pass
+
+    # If the model has deleted_by_user_id, clear it too.
+    try:
+        if hasattr(order, "deleted_by_user_id"):
+            setattr(order, "deleted_by_user_id", None)
+    except Exception:
+        pass
+
+    _stamp_order_user_ids(order, session_user)
+
+    after = _order_snapshot(order)
+    actor = _actor_from_session_or_initials(session_user, initials)
+    _audit(
+        db,
+        action="restore",
+        actor=actor,
+        order=order,
+        details={
+            "before": before,
+            "after": after,
+            "changes": _diff_dict(before, after, ["is_deleted", "deleted_at", "deleted_by"]),
+        },
+    )
+
+    db.commit()
+    db.refresh(order)
+
+    order.parent_display = _parent_display(order)
     return order
 
 
@@ -883,7 +981,7 @@ def update_order(
     request: Request,
     order_id: int,
     payload: OrderUpdate,
-    override: bool = Query(default=False, description="Allow editing finalized orders + sync Trello checklist."),
+    override: bool = Query(default=False, description="Allow override edit on finalized orders (unfinalizes to draft)."),
     db: Session = Depends(get_db),
     session_user: dict = Depends(require_login),
     initials: str | None = Query(default=None, description="Your initials for audit log (optional)."),
@@ -931,6 +1029,18 @@ def update_order(
             except Exception:
                 pass
 
+    # If this is an override edit of a finalized order, flip it back to draft NOW.
+    # This is the whole point of override: user can edit, then finalize again.
+    if override and (order.status or "").lower() == "finalized":
+        order.status = "draft"
+        touched_fields.append("status")
+        # Clearing finalized_at is critical; otherwise /finalize is a no-op.
+        try:
+            order.finalized_at = None
+            touched_fields.append("finalized_at")
+        except Exception:
+            pass
+
     # finalized orders are read-only unless override=true
     if (order.status or "draft") == "finalized" and not override:
         raise HTTPException(status_code=400, detail="order is finalized; use override=true to edit")
@@ -964,31 +1074,6 @@ def update_order(
 
     db.commit()
     db.refresh(order)
-
-    # If this was an override edit on a finalized order with Trello linkage → rebuild checklist
-    if override and (order.status or "").lower() == "finalized":
-        if not order.trello_card_id or not order.trello_checklist_id:
-            raise HTTPException(status_code=400, detail="finalized order missing trello_card_id/trello_checklist_id")
-        try:
-            checklist_name = "NEW"
-            if getattr(order, "sp", None) and getattr(order.sp, "sp_number", None):
-                checklist_name = order.sp.sp_number
-
-            new_checklist_id = rebuild_order_checklist(
-                card_id=order.trello_card_id,
-                old_checklist_id=order.trello_checklist_id,
-                checklist_name=checklist_name,
-                notes=order.notes,
-            )
-
-            order.trello_checklist_id = new_checklist_id
-            db.commit()
-            db.refresh(order)
-            touched_fields.append("trello_checklist_id")
-        except TrelloConfigError as e:
-            raise HTTPException(status_code=500, detail=str(e))
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Trello sync failed: {e}")
 
     # Audit after all changes have settled (including possible Trello id changes)
     after = _order_snapshot(order)

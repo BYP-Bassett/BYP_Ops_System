@@ -1,69 +1,92 @@
-# Project Brain — SP Order System (as of 2026-01-15)
+# Project Brain — BYP Ops / SP Order System
 
-## Goal
-Replace legacy FileMaker workflows with a Windows-first order system:
-- FastAPI backend + SQLite (dev)
-- Desktop Tkinter GUI (office use)
-- Simple Web UI (remote use)
-- Trello integration on finalize for radio/video
-- Real user auth + admin user management
+Last updated: **2026-01-16** (America/Chicago)
 
-## Architecture (current)
-- **API:** FastAPI (`app/main.py`)
-- **DB:** SQLite `backend/byp_ops.db` via SQLAlchemy
-- **Migrations:** Alembic (`backend/alembic/*`)
-- **Desktop:** `OrderSearchGUI.pyw` (Tkinter)
-- **Web:** static-ish UI served from FastAPI (`/`, `/order/<built-in function id>`)
+## Repo + Local Setup
+- Repo: `BYP-Bassett/BYP_Ops_System`
+- Branch: `fix-delete-override`
+- Local backend root: `C:\BYP_Ops_System\backend`
+- DB (dev): `backend\byp_ops.db` (SQLite)
+- Engine URL: `sqlite:///C:/BYP_Ops_System/backend/byp_ops.db`
 
-## Entrypoints
-### Start API
-```powershell
-cd C:\BYP_Ops_System\backend
-.\venv\Scripts\python.exe -m uvicorn app.main:app --reload
-```
+### Run
+- API:
+  - `cd C:\BYP_Ops_System\backend`
+  - `.\venv\Scripts\python.exe -m uvicorn app.main:app --reload`
+- Desktop GUI:
+  - `cd C:\BYP_Ops_System\backend`
+  - `python OrderSearchGUI.pyw`
 
-### Start Desktop GUI
-```powershell
-cd C:\BYP_Ops_System\backend
-python OrderSearchGUI.pyw
-```
+## What Works Now
 
-## Current Working State (truth)
-- Web UI works and is **login-gated**.
-- Desktop GUI works and is **login-gated**; it can remember login via cookies.
-- Web Admin Users page exists at `/admin/users`.
-- Trello finalize auto-create works when missing linkages.
-- Orders have new user-id audit columns and routes stamp them on writes.
-- Alembic heads were merged (confirm single head).
+### Web UI (login-gated)
+- Search/list page: `http://127.0.0.1:8000/`
+- Order detail HTML: `http://127.0.0.1:8000/order/{id}`
+- Order detail JSON: `http://127.0.0.1:8000/orders/{id}`
+- Order detail supports editing **draft-only asset_type** + **notes** + **client name/company** and saving via **Save**.
+- Order detail has **Open Trello Card** button:
+  - Enabled when `trello_card_id` is present.
+  - Uses backend helper endpoint `/trello/card-url/{trello_card_id}` (Trello API resolve).
+- Known: **Back does NOT autosave** (pinned).
 
-## Current Known Gaps (still pending)
-- Desktop does **not** have an admin users page (web-only right now).
-- Delete/override flows still prompt for “initials” in places; legacy `deleted_by` remains.
-- Need to harden “disable user” behavior to ensure existing sessions can’t keep operating (verify/adjust).
-- Web “My Drafts” filter (like desktop) not finished.
+### Auth
+- `/login` + cookie sessions (SessionMiddleware)
+- `/me` returns: authenticated, user_id, username, rep_code, rep_name, role, is_active
+- **Inactive users are blocked** and existing sessions are invalidated (hardening implemented).
 
-## Non‑negotiable rules
+### Admin
+- Web admin users screen: `/admin/users` (HTML) and `/admin/users?json=1` (JSON)
+- Desktop admin users window exists with parity for core actions (list/add/disable/role/password) and is **admins-only**.
+
+### Finalize + Trello
+- Finalize radio/video with missing Trello linkage auto-creates:
+  - Trello card in rep’s board “To Do”
+  - Checklist on the card
+  - Stores `trello_card_id` + `trello_checklist_id` back on the order
+  - Sets `status=finalized` and `finalized_at`
+- **ART orders do not use SP numbers**.
+  - Trello checklist naming/creation for ART was fixed and verified working.
+
+### Override edit on finalized orders
+- Override-edit workflow now correctly supports “finalize again”:
+  - Old checklist is removed/rebuilt (no duplicate stale checklist)
+  - New checklist id is stored back on the order
+  - Card remains linked
+
+### Audit stamping
+- DB columns exist and are stamped on key routes:
+  - `orders.created_by_user_id`
+  - `orders.updated_by_user_id`
+  - `orders.deleted_by_user_id`
+- Applied on: create, update, finalize, unfinalize, revise, duplicate, additional-version, delete.
+
+### Delete (legacy behavior)
+- DELETE requires initials query param:
+  - `/orders/{id}?initials=SB`
+  - Not JSON body.
+
+## Savepoints / Tags
+- `savepoint-auth-desktop-cookie-2026-01-14`
+- `savepoint-desktop-admin-users-2026-01-15`
+- `savepoint-auth-inactive-kills-session-2026-01-15`
+- `savepoint-art-finalize-trello-checklist-2026-01-15`
+
+## Known Issues / Pinned
+- Web detail page **Back** does not autosave; we agreed to pin (either adults hit Save, or later add “unsaved changes” warning / confirm).
+
+## Guardrails / Non‑Negotiables
 - One step at a time.
-- No manual edits: Steve uploads file → return downloadable replacement with same filename.
-- Never rename files.
+- No manual file editing.
+- If a file change is needed: user uploads current file → assistant returns **downloadable replacement** with the **exact same filename**.
+- No renaming files. Ever.
 - Windows paths only.
-- GUI layout changes pinned unless explicitly unpinned.
-- Avoid `${ }` inside Python f-strings embedding HTML/JS.
-- For troubleshooting, always collect:
-  1) exact command run
-  2) full traceback
-  3) the crashing file content (last `File "..."` in traceback)
+- GUI layout tweaks pinned unless explicitly unpinned.
+- No `${}` inside Python f-strings that embed HTML/JS.
+- PowerShell passwords containing `$` must be in **single quotes**.
 
-## Key files (index)
-- `app/main.py` — app setup, session auth, login, `/me`, web admin users UI
-- `app/routes/orders.py` — orders API routes + user-id audit stamping
-- `app/models/orders.py` — Order model + new audit user_id columns
-- `app/models/users.py` — User model (role/is_active/password_hash)
-- `app/database/session.py` / `engine.py` / `base.py` — SQLAlchemy engine/session/Base
-- `alembic/env.py` — Alembic config/metadata
-- `alembic/versions/*` — migrations (including merge migration + audit columns)
-
-## Immediate Next Single Target
-Add a Desktop Admin Users window to `OrderSearchGUI.pyw` (parity with web admin):
-- list/create/enable-disable/set password/set role
-- restrict to admin users only
+## Next Logical Target (recommended)
+- Add **Admin Orders tools**:
+  - Search/view deleted orders
+  - Undelete (restore) orders
+  - Optional: audit viewer / basic health checks
+  - Optional: “Open Trello card” from admin order view too
