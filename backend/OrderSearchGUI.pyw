@@ -14,6 +14,7 @@ import os
 import threading
 import tkinter as tk
 import http.cookiejar
+from html.parser import HTMLParser
 from tkinter import ttk, messagebox, simpledialog
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
@@ -86,8 +87,179 @@ def _save_cookies():
         pass
 
 def _read_json_response(resp):
+    """Read a urllib response as JSON, with robust diagnostics.
+
+    Common failure modes in this project:
+      - HTML returned (server-rendered admin pages / login bounce)
+      - Empty or whitespace-only bodies
+      - Non-JSON error pages
+
+    We normalize whitespace and surface a helpful snippet instead of a JSONDecodeError.
+    """
     raw = resp.read().decode("utf-8", errors="replace")
-    return json.loads(raw) if raw else {}
+    stripped = raw.strip()
+
+    # Empty / whitespace-only
+    if not stripped:
+        return {}
+
+    # Content-Type hint (best-effort)
+    ct = ""
+    try:
+        ct = resp.headers.get_content_type() or ""
+    except Exception:
+        try:
+            ct = resp.headers.get("Content-Type", "") or ""
+        except Exception:
+            ct = ""
+
+    # If it smells like HTML, don't pretend it's JSON
+    if stripped.startswith("<") or "text/html" in ct.lower():
+        snippet = stripped[:300].replace("\n", " ")
+        raise RuntimeError(f"Expected JSON but got text/html. Snippet: {snippet}")
+
+    # Parse JSON, but convert decode errors into something useful
+    try:
+        return json.loads(stripped)
+    except Exception as e:
+        snippet = stripped[:300].replace("\n", " ")
+        raise RuntimeError(f"Expected JSON but got {ct or 'unknown'}. Snippet: {snippet}") from e
+
+
+
+class _HTMLTableParser(HTMLParser):
+    """Very small HTML table extractor (no external deps).
+
+    We use this because /admin/users is currently server-rendered (HTML), but
+    the desktop GUI needs a native Users list without opening a browser.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self._in_table = False
+        self._in_tr = False
+        self._capture = False
+        self._cell = ""
+        self._row = []
+        self.tables = []
+        self._table = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "table":
+            self._in_table = True
+            self._table = []
+        if self._in_table and tag == "tr":
+            self._in_tr = True
+            self._row = []
+        if self._in_table and self._in_tr and tag in ("th", "td"):
+            self._capture = True
+            self._cell = ""
+
+    def handle_endtag(self, tag):
+        if tag == "table" and self._in_table:
+            self._in_table = False
+            if self._table:
+                self.tables.append(self._table)
+            self._table = []
+        if self._in_table and tag == "tr" and self._in_tr:
+            self._in_tr = False
+            if any((c or "").strip() for c in self._row):
+                self._table.append(self._row)
+            self._row = []
+        if self._capture and tag in ("th", "td"):
+            self._capture = False
+            cell = " ".join((self._cell or "").split()).strip()
+            self._row.append(cell)
+            self._cell = ""
+
+    def handle_data(self, data):
+        if self._capture:
+            self._cell += data
+
+
+def _parse_admin_users_html(html_text: str) -> list[dict]:
+    """Parse /admin/users HTML into a list of user dicts.
+
+    We look for the most likely table (headers include 'username' and 'role'),
+    then map common column headers to our expected keys.
+    """
+    try:
+        p = _HTMLTableParser()
+        p.feed(html_text or "")
+        tables = p.tables or []
+        if not tables:
+            return []
+        best = None
+        for t in tables:
+            if not t:
+                continue
+            header = [str(h).strip().lower() for h in (t[0] or [])]
+            if any("user" in h for h in header) and any("role" in h for h in header):
+                best = t
+                break
+        if best is None:
+            best = tables[0]
+        if not best or len(best) < 2:
+            return []
+
+        headers = [str(h).strip().lower() for h in (best[0] or [])]
+
+        def key_for(h: str):
+            h = (h or "").strip().lower()
+            if h in ("id", "user id", "userid"):
+                return "id"
+            if "username" in h or h == "user":
+                return "username"
+            if "rep code" in h or "rep_code" in h or "repcode" in h:
+                return "rep_code"
+            if "rep name" in h or "rep_name" in h:
+                return "rep_name"
+            if "email" in h:
+                return "email"
+            if "role" in h:
+                return "role"
+            if "active" in h or "enabled" in h or h == "status":
+                return "is_active"
+            return None
+
+        keys = [key_for(h) for h in headers]
+        out = []
+        for row in best[1:]:
+            if not row:
+                continue
+            u = {}
+            for k, cell in zip(keys, row):
+                if not k:
+                    continue
+                cell = (cell or "").strip()
+                if k == "is_active":
+                    v = cell.lower()
+                    u[k] = v in ("1", "true", "yes", "y", "active", "enabled", "on")
+                elif k == "id":
+                    try:
+                        import re as _re
+                        u[k] = int(_re.findall(r"\d+", cell)[0])
+                    except Exception:
+                        u[k] = cell
+                else:
+                    u[k] = cell
+            if u:
+                out.append(u)
+        return out
+    except Exception:
+        return []
+
+
+def http_get_text(url: str, timeout: int = 10) -> tuple[str, str]:
+    req = Request(url, headers={"Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"})
+    with _OPENER.open(req, timeout=timeout) as resp:
+        raw = resp.read().decode("utf-8", errors="replace")
+        try:
+            ct = resp.headers.get("Content-Type", "") or ""
+        except Exception:
+            ct = ""
+        _save_cookies()
+        return raw, ct
 
 
 def http_get_json(url: str, timeout: int = 10) -> dict:
@@ -196,7 +368,21 @@ def api_admin_users_list(timeout: int = 12) -> list[dict]:
     for url in urls:
         try:
             data = http_get_json(url, timeout=timeout)
+        except RuntimeError as e:
+            # /admin/users is server-rendered (HTML) — parse the table as a fallback.
+            if 'Expected JSON but got text/html' in str(e):
+                try:
+                    html_text, _ct = http_get_text(url, timeout=timeout)
+                    users = _parse_admin_users_html(html_text)
+                    if users:
+                        return users
+                except Exception:
+                    pass
+            last_err = e
+            continue
         except Exception as e:
+            last_err = e
+            continue
             last_err = e
             continue
 
@@ -286,9 +472,11 @@ class FinalizeDialog(tk.Toplevel):
                 http_post_json(f"{API_BASE}/orders/{self.order_id}/finalize?{qs}", payload=None, timeout=25)
                 self.after(0, self._done)
             except HTTPError as e:
-                self.after(0, lambda: self._fail(_http_error_to_message(e)))
+                msg = _http_error_to_message(e)
+                self.after(0, lambda msg=msg: self._fail(msg))
             except Exception as e:
-                self.after(0, lambda: self._fail(str(e)))
+                msg = str(e)
+                self.after(0, lambda msg=msg: self._fail(msg))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -645,11 +833,13 @@ class OrderDetailsWindow(tk.Toplevel):
                 data = http_get_json(f"{API_BASE}/orders/{self.order_id}", timeout=20)
                 self.after(0, lambda: self._apply_order(data))
             except HTTPError as e:
-                self.after(0, lambda: self._fail(_http_error_to_message(e)))
+                msg = _http_error_to_message(e)
+                self.after(0, lambda msg=msg: self._fail(msg))
             except URLError as e:
                 self.after(0, lambda: self._fail(f"Connection error: {e}"))
             except Exception as e:
-                self.after(0, lambda: self._fail(str(e)))
+                msg = str(e)
+                self.after(0, lambda msg=msg: self._fail(msg))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -1742,11 +1932,13 @@ class OrderSearchGUI(tk.Tk):
                     total = len(items)
                 self.after(0, lambda: self._apply_results(items, total=total, silent=silent))
             except HTTPError as e:
-                self.after(0, lambda: self._search_fail(_http_error_to_message(e), silent=silent))
+                msg = _http_error_to_message(e)
+                self.after(0, lambda msg=msg: self._search_fail(msg, silent=silent))
             except URLError as e:
                 self.after(0, lambda: self._search_fail(f"Connection error: {e}", silent=silent))
             except Exception as e:
-                self.after(0, lambda: self._search_fail(str(e), silent=silent))
+                msg = str(e)
+                self.after(0, lambda msg=msg: self._search_fail(msg, silent=silent))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -1834,6 +2026,16 @@ class OrderSearchGUI(tk.Tk):
             AdminUsersWindow(self)
         except Exception as e:
             messagebox.showerror("Admin", str(e))
+
+
+    def open_deleted_orders(self):
+        if not getattr(self, "_is_admin", False):
+            messagebox.showerror("Not allowed", "Admin access required.")
+            return
+        try:
+            DeletedOrdersWindow(self)
+        except Exception as e:
+            messagebox.showerror("Deleted Orders", str(e))
 
     def _init_context_menu(self):
         # Context menu for the search grid
@@ -2017,6 +2219,7 @@ class AdminUsersWindow(tk.Toplevel):
         top.pack(fill="x", padx=10, pady=10)
 
         ttk.Button(top, text="Refresh", command=self.refresh).pack(side="left")
+        ttk.Button(top, text="Deleted Orders", command=self.parent.open_deleted_orders).pack(side="left", padx=(10, 0))
         ttk.Label(top, textvariable=self.msg_var).pack(side="right")
 
         # Add User card
@@ -2131,9 +2334,11 @@ class AdminUsersWindow(tk.Toplevel):
                 api_admin_user_add(payload, timeout=15)
                 self.after(0, done_ok)
             except HTTPError as e:
-                self.after(0, lambda: done_fail(_http_error_to_message(e)))
+                msg = _http_error_to_message(e)
+                self.after(0, lambda msg=msg: done_fail(msg))
             except Exception as e:
-                self.after(0, lambda: done_fail(str(e)))
+                msg = str(e)
+                self.after(0, lambda msg=msg: done_fail(msg))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -2190,9 +2395,11 @@ class AdminUsersWindow(tk.Toplevel):
                 api_admin_user_toggle_active(user_id, timeout=15)
                 self.after(0, done_ok)
             except HTTPError as e:
-                self.after(0, lambda: done_fail(_http_error_to_message(e)))
+                msg = _http_error_to_message(e)
+                self.after(0, lambda msg=msg: done_fail(msg))
             except Exception as e:
-                self.after(0, lambda: done_fail(str(e)))
+                msg = str(e)
+                self.after(0, lambda msg=msg: done_fail(msg))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -2227,9 +2434,11 @@ class AdminUsersWindow(tk.Toplevel):
                 users = api_admin_users_list(timeout=12)
                 self.after(0, lambda: apply(users))
             except HTTPError as e:
-                self.after(0, lambda: fail(_http_error_to_message(e)))
+                msg = _http_error_to_message(e)
+                self.after(0, lambda msg=msg: fail(msg))
             except Exception as e:
-                self.after(0, lambda: fail(str(e)))
+                msg = str(e)
+                self.after(0, lambda msg=msg: fail(msg))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -2263,6 +2472,189 @@ class AdminUsersWindow(tk.Toplevel):
     def _fail(self, msg: str):
         self.msg_var.set('Failed.')
         messagebox.showerror('Admin users', msg, parent=self)
+
+
+
+class DeletedOrdersWindow(tk.Toplevel):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.parent = parent
+        self.title("Admin — Deleted Orders")
+        self.geometry("980x520")
+        self.resizable(True, True)
+
+        self.msg_var = tk.StringVar(value="")
+        self._req_id = 0
+
+        self._build_ui()
+        self.refresh()
+
+    def _build_ui(self):
+        top = ttk.Frame(self)
+        top.pack(fill="both", expand=True, padx=10, pady=10)
+
+        cols = ("sp", "id", "asset_type", "artist", "status", "deleted_at", "deleted_by")
+        self.tree = ttk.Treeview(top, columns=cols, show="headings", selectmode="browse")
+
+        headings = {
+            "sp": "SP#",
+            "id": "ID",
+            "asset_type": "Type",
+            "artist": "Artist",
+            "status": "Status",
+            "deleted_at": "Deleted At",
+            "deleted_by": "By",
+        }
+        widths = {
+            "sp": 120,
+            "id": 70,
+            "asset_type": 80,
+            "artist": 360,
+            "status": 110,
+            "deleted_at": 170,
+            "deleted_by": 80,
+        }
+        for c in cols:
+            self.tree.heading(c, text=headings.get(c, c))
+            self.tree.column(c, width=widths.get(c, 120), anchor="w", stretch=(c == "artist"))
+
+        yscroll = ttk.Scrollbar(top, orient="vertical", command=self.tree.yview)
+        xscroll = ttk.Scrollbar(top, orient="horizontal", command=self.tree.xview)
+        self.tree.configure(yscrollcommand=yscroll.set, xscrollcommand=xscroll.set)
+
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        yscroll.grid(row=0, column=1, sticky="ns")
+        xscroll.grid(row=1, column=0, sticky="ew")
+
+        top.rowconfigure(0, weight=1)
+        top.columnconfigure(0, weight=1)
+
+        bottom = ttk.Frame(self)
+        bottom.pack(fill="x", padx=10, pady=(0, 10))
+
+        ttk.Label(bottom, textvariable=self.msg_var).pack(side="left", padx=(0, 10))
+
+        ttk.Button(bottom, text="Refresh", command=self.refresh).pack(side="right", padx=(6, 0))
+        ttk.Button(bottom, text="Restore Selected", command=self.restore_selected).pack(side="right")
+        ttk.Button(bottom, text="Close", command=self.destroy).pack(side="right", padx=(0, 6))
+
+        self.tree.bind("<Double-1>", lambda _e: self.restore_selected())
+
+    def refresh(self):
+        self._req_id += 1
+        req_id = self._req_id
+        self.msg_var.set("Loading deleted orders...")
+
+        def api_fn():
+            # IMPORTANT: do NOT call GET /orders/{id} for deleted orders (backend returns 404).
+            return http_get_json(f"{API_BASE}/orders/deleted?limit=500&offset=0", timeout=25)
+
+        def on_ok(data):
+            if req_id != self._req_id:
+                return
+            self.msg_var.set("")
+            # Normalize payload shapes:
+            items = []
+            total = None
+            if isinstance(data, dict):
+                items = data.get("items") or data.get("results") or data.get("orders") or []
+                total = data.get("total")
+            elif isinstance(data, list):
+                items = data
+            else:
+                items = []
+
+            # Rebuild rows
+            for iid in self.tree.get_children():
+                self.tree.delete(iid)
+
+            for it in items or []:
+                if not isinstance(it, dict):
+                    continue
+                oid = it.get("id")
+                # Try multiple possible keys for SP number without extra API calls.
+                sp_num = it.get("sp_number") or ""
+                if not sp_num:
+                    sp = it.get("sp")
+                    if isinstance(sp, dict):
+                        sp_num = sp.get("sp_number") or ""
+                row = (
+                    sp_num,
+                    oid,
+                    it.get("asset_type") or "",
+                    it.get("artist") or "",
+                    it.get("status") or "",
+                    it.get("deleted_at") or "",
+                    it.get("deleted_by") or "",
+                )
+                self.tree.insert("", "end", values=row)
+
+            if total is None:
+                total = len(items or [])
+            self.msg_var.set(f"{total} deleted orders")
+
+        def on_fail(msg):
+            if req_id != self._req_id:
+                return
+            self.msg_var.set("")
+            messagebox.showerror("Deleted Orders", msg, parent=self)
+
+        if hasattr(self.parent, "_call_api_with_auth"):
+            self.parent._call_api_with_auth(self, api_fn, on_ok, on_fail)
+        else:
+            try:
+                on_ok(api_fn())
+            except Exception as e:
+                on_fail(str(e))
+
+    def restore_selected(self):
+        sel = self.tree.selection() or ()
+        if not sel:
+            messagebox.showinfo("Restore", "Select an order first.", parent=self)
+            return
+
+        vals = self.tree.item(sel[0], "values") or ()
+        # columns: sp, id, ...
+        order_id = None
+        if len(vals) >= 2:
+            order_id = vals[1]
+        if order_id in (None, "", "None"):
+            messagebox.showerror("Restore", "Could not determine order ID.", parent=self)
+            return
+
+        # Convert to int-ish string
+        try:
+            order_id_int = int(str(order_id))
+        except Exception:
+            messagebox.showerror("Restore", f"Invalid order ID: {order_id}", parent=self)
+            return
+
+        self.msg_var.set("Restoring...")
+
+        def api_fn():
+            return http_post_json(f"{API_BASE}/orders/{order_id_int}/restore", payload=None, timeout=25)
+
+        def on_ok(_data):
+            self.msg_var.set("")
+            # Refresh deleted list and the main search list (best effort)
+            self.refresh()
+            try:
+                self.parent.run_search()
+            except Exception:
+                pass
+
+        def on_fail(msg):
+            self.msg_var.set("")
+            messagebox.showerror("Restore", msg, parent=self)
+
+        if hasattr(self.parent, "_call_api_with_auth"):
+            self.parent._call_api_with_auth(self, api_fn, on_ok, on_fail)
+        else:
+            try:
+                on_ok(api_fn())
+            except Exception as e:
+                on_fail(str(e))
+
 
 
 def main():
