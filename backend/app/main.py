@@ -19,6 +19,7 @@ from app.routes.orders import router as orders_router
 # DB / models (for auth)
 from app.database.engine import SessionLocal
 from app.models.users import User
+from app.models.orders import Order
 
 
 app = FastAPI()
@@ -314,49 +315,15 @@ def _html_escape(s: str) -> str:
 # ---- Admin: Users page ----
 @app.get("/admin/users", include_in_schema=False)
 def admin_users_page(request: Request, msg: str | None = None, err: str | None = None):
-    # JSON mode for desktop/admin tooling: /admin/users?json=1
-    accept = (request.headers.get("accept") or "").lower()
-    wants_json = (request.query_params.get("json") == "1")
-    if not wants_json and "application/json" in accept and "text/html" not in accept:
-        wants_json = True
-
-    if wants_json:
-        # Return API-style errors instead of redirects.
-        if not _is_logged_in(request):
-            return JSONResponse(status_code=401, content={"detail": "Not authenticated"})
-        if not _is_admin(request):
-            return JSONResponse(status_code=403, content={"detail": "Not authorized"})
-    else:
-        gate = _require_admin_or_redirect(request)
-        if gate is not None:
-            return gate
+    gate = _require_admin_or_redirect(request)
+    if gate is not None:
+        return gate
 
     db = SessionLocal()
     try:
         users = db.query(User).order_by(User.id.asc()).all()
     finally:
         db.close()
-    if wants_json:
-        items = []
-        for u in users:
-            # Keep keys stable for desktop tooling.
-            item = {
-                "id": getattr(u, "id", None),
-                "username": getattr(u, "username", ""),
-                "rep_code": getattr(u, "rep_code", "") or "",
-                "rep_name": getattr(u, "rep_name", "") or "",
-                "email": getattr(u, "email", "") or "",
-                "role": getattr(u, "role", "user") or "user",
-                "is_active": bool(getattr(u, "is_active", True)),
-            }
-            # Optional timestamps if present
-            if hasattr(u, "created_at"):
-                item["created_at"] = str(getattr(u, "created_at") or "")
-            if hasattr(u, "updated_at"):
-                item["updated_at"] = str(getattr(u, "updated_at") or "")
-            items.append(item)
-        return JSONResponse(content=items)
-
 
     rows = []
     for u in users:
@@ -419,6 +386,8 @@ def admin_users_page(request: Request, msg: str | None = None, err: str | None =
     a {{ color: inherit; }}
     button {{ padding: 8px 12px; border: 1px solid #888; border-radius: 10px; background: #f4f4f4; cursor: pointer; }}
     button:active {{ transform: translateY(1px); }}
+    .btnlink {{ padding: 8px 12px; border: 1px solid #888; border-radius: 10px; background: #f4f4f4; cursor: pointer; text-decoration: none; display: inline-block; }}
+    .btnlink:active {{ transform: translateY(1px); }}
     .card {{ border: 1px solid #ddd; border-radius: 12px; padding: 12px; background: #fff; }}
     .muted {{ color: #666; font-size: 13px; }}
     .ok {{ color: #0a7b27; font-weight: 700; white-space: pre-wrap; }}
@@ -436,6 +405,7 @@ def admin_users_page(request: Request, msg: str | None = None, err: str | None =
 
   <div class="bar">
     <a href="/">← Back to Search</a>
+    <a class="btnlink" href="/admin/deleted-orders">Deleted Orders</a>
     <form method="post" action="/logout" style="margin:0;">
       <button type="submit">Logout</button>
     </form>
@@ -651,6 +621,194 @@ def admin_users_set_password(request: Request, user_id: int, password: str = For
         db.close()
 
 
+
+
+# ---- Admin: Deleted Orders (web) ----
+@app.get("/admin/deleted-orders", include_in_schema=False)
+def admin_deleted_orders_page(request: Request, msg: str | None = None, err: str | None = None):
+    gate = _require_admin_or_redirect(request)
+    if gate is not None:
+        return gate
+
+    def _safe_sp_number(order_obj) -> str:
+        """Return an SP# (e.g., SP000133) if available; otherwise empty string."""
+        try:
+            # Some schemas may denormalize SP onto the order.
+            v = getattr(order_obj, "sp_number", None)
+            if v:
+                return str(v)
+        except Exception:
+            pass
+        try:
+            sp_obj = getattr(order_obj, "sp", None)
+            if sp_obj is not None:
+                v = getattr(sp_obj, "sp_number", None)
+                if v:
+                    return str(v)
+        except Exception:
+            pass
+        return ""
+
+    def fmt_dt(v):
+        if not v:
+            return ""
+        s = str(v)
+        return s.replace("T", " ")
+
+    rows = []
+    db = SessionLocal()
+    try:
+        # newest first
+        q = db.query(Order).filter(getattr(Order, "is_deleted") == True)  # noqa: E712
+        if hasattr(Order, "deleted_at"):
+            q = q.order_by(getattr(Order, "deleted_at").desc(), getattr(Order, "id").desc())
+        else:
+            q = q.order_by(getattr(Order, "id").desc())
+        deleted = q.limit(500).all()
+
+        for o in deleted:
+            sp_number = _html_escape(_safe_sp_number(o))
+            oid = getattr(o, "id", "")
+            artist = _html_escape(str(getattr(o, "artist", "") or ""))
+            asset = _html_escape(str(getattr(o, "asset_type", "") or ""))
+            status = _html_escape(str(getattr(o, "status", "") or ""))
+            deleted_at = _html_escape(fmt_dt(getattr(o, "deleted_at", "")))
+            deleted_by = _html_escape(str(getattr(o, "deleted_by", "") or ""))
+
+            rows.append(
+                f"""
+                <tr>
+                  <td class=\"nowrap\">{sp_number}</td>
+                  <td>{oid}</td>
+                  <td>{artist}</td>
+                  <td>{asset}</td>
+                  <td>{status}</td>
+                  <td>{deleted_at}</td>
+                  <td>{deleted_by}</td>
+                  <td style=\"white-space:nowrap;\">
+                    <a class=\"btnlink\" href=\"/order/{oid}\" target=\"_blank\" rel=\"noopener\">View</a>
+                    <form method=\"post\" action=\"/admin/deleted-orders/{oid}/restore\" style=\"display:inline; margin:0; margin-left:6px;\" onsubmit=\"return confirm('Restore order {oid}?');\">
+                      <button type=\"submit\">Restore</button>
+                    </form>
+                  </td>
+                </tr>
+                """
+            )
+    finally:
+        db.close()
+
+    username = _html_escape(str(request.session.get("username") or ""))
+    msg_txt = _html_escape((msg or "").strip())
+    err_txt = _html_escape((err or "").strip())
+
+    body_rows = "\n".join(rows) if rows else "<tr><td colspan=\"8\" class=\"muted\">(none)</td></tr>"
+
+    html = f"""<!doctype html>
+<html lang=\"en\">
+<head>
+  <meta charset=\"utf-8\" />
+  <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\" />
+  <title>BYP Ops — Deleted Orders</title>
+  <style>
+    body {{ font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 16px; max-width: 1200px; }}
+    h1 {{ margin: 0 0 10px 0; font-size: 22px; }}
+    .bar {{ display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin: 10px 0 14px 0; }}
+    a {{ color: inherit; }}
+    button {{ padding: 8px 12px; border: 1px solid #888; border-radius: 10px; background: #f4f4f4; cursor: pointer; }}
+    button:active {{ transform: translateY(1px); }}
+    .btnlink {{ padding: 8px 12px; border: 1px solid #888; border-radius: 10px; background: #f4f4f4; cursor: pointer; text-decoration: none; display: inline-block; }}
+    .btnlink:active {{ transform: translateY(1px); }}
+    .card {{ border: 1px solid #ddd; border-radius: 12px; padding: 12px; background: #fff; }}
+    .muted {{ color: #666; font-size: 13px; }}
+    .ok {{ color: #0a7b27; font-weight: 700; white-space: pre-wrap; }}
+    .err {{ color: #b00020; font-weight: 700; white-space: pre-wrap; }}
+    table {{ width: 100%; border-collapse: collapse; }}
+    th, td {{ padding: 8px; border-bottom: 1px solid #eee; text-align: left; vertical-align: top; font-size: 14px; }}
+    th {{ font-size: 12px; color: #444; user-select: none; }}
+    .nowrap {{ white-space: nowrap; }}
+  </style>
+</head>
+<body>
+  <h1>Admin — Deleted Orders</h1>
+
+  <div class=\"bar\">
+    <a class=\"btnlink\" href=\"/admin/users\">← Admin Users</a>
+    <a class=\"btnlink\" href=\"/\">Search</a>
+    <form method=\"post\" action=\"/logout\" style=\"margin:0;\">
+      <button type=\"submit\">Logout</button>
+    </form>
+    <span class=\"muted\">Logged in as: <b>{username}</b></span>
+  </div>
+
+  <div class=\"ok\">{msg_txt}</div>
+  <div class=\"err\">{err_txt}</div>
+
+  <div class=\"card\">
+    <div class=\"muted\" style=\"margin-bottom:10px;\">Newest first. Restore is idempotent. (Restore clears deleted_at/deleted_by so the order returns to normal search.)</div>
+    <table>
+      <thead>
+        <tr>
+          <th class=\"nowrap\">SP#</th>
+          <th>ID</th>
+          <th>Artist</th>
+          <th>Asset</th>
+          <th>Status</th>
+          <th>Deleted At</th>
+          <th>Deleted By</th>
+          <th class=\"nowrap\">Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        {body_rows}
+      </tbody>
+    </table>
+  </div>
+</body>
+</html>
+"""
+
+    return HTMLResponse(content=html)
+
+
+@app.post("/admin/deleted-orders/{order_id}/restore", include_in_schema=False)
+def admin_deleted_orders_restore(request: Request, order_id: int):
+    gate = _require_admin_or_redirect(request)
+    if gate is not None:
+        return gate
+
+    db = SessionLocal()
+    try:
+        o = db.query(Order).filter(Order.id == order_id).first()
+        if not o:
+            return RedirectResponse(url="/admin/deleted-orders?err=Order+not+found", status_code=303)
+
+        if not bool(getattr(o, "is_deleted", False)):
+            return RedirectResponse(url="/admin/deleted-orders?msg=Order+already+active", status_code=303)
+
+        # Capture deletion metadata for the success message (we clear it on restore so it returns to normal search).
+        prev_deleted_at = getattr(o, "deleted_at", None)
+        prev_deleted_by = getattr(o, "deleted_by", None)
+
+        setattr(o, "is_deleted", False)
+        if hasattr(o, "deleted_at"):
+            setattr(o, "deleted_at", None)
+        if hasattr(o, "deleted_by"):
+            setattr(o, "deleted_by", None)
+        if hasattr(o, "deleted_by_user_id"):
+            setattr(o, "deleted_by_user_id", None)
+
+        db.commit()
+
+        # Keep the UI message useful but short.
+        msg = f"Restored order {order_id}"
+        if prev_deleted_by:
+            msg += f" (was deleted by {prev_deleted_by})"
+        return RedirectResponse(url="/admin/deleted-orders?msg=" + _url_q(msg), status_code=303)
+    except Exception as e:
+        db.rollback()
+        return RedirectResponse(url="/admin/deleted-orders?err=" + _url_q(str(e)), status_code=303)
+    finally:
+        db.close()
 
 
 # API routes
@@ -1162,7 +1320,12 @@ var orderRows = document.getElementById("orderRows");
 
       function refreshDirtyUI() {
         var dirty = isDirty();
-        saveBtn.disabled = !dirty;
+        if (isDraftNow) {
+          // Keep Save enabled for draft orders (even if nothing changed yet).
+          saveBtn.disabled = false;
+        } else {
+          saveBtn.disabled = true;
+        }
         resetBtn.disabled = !dirty;
       }
 
@@ -1532,9 +1695,6 @@ function load() {
               client_company_name: normalize(data.client_company_name)
             };
             setDraftFromBaseline();
-
-            // Initial payload loaded - enable unload guards + autosave scheduling.
-            hasLoadedOnce = true;
 
             // Wire dirty tracking
             function onChange() {
