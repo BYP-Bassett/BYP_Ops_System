@@ -25,10 +25,23 @@ from sqlalchemy.orm import Session, joinedload
 
 from app.database.session import get_db
 from app.schemas.order import OrderCreate, OrderUpdate, OrderResponse
+
+# Allow admin users to create orders on behalf of another rep by passing rep_code/rep_name.
+# We keep this local (instead of editing the shared schema) to avoid rippling changes.
+class OrderCreateWithRep(OrderCreate):
+    rep_code: str | None = None
+    rep_name: str | None = None
+
+# Allow rep reassignment on existing (non-finalized) orders via PATCH.
+class OrderUpdateWithRep(OrderUpdate):
+    rep_code: str | None = None
+    rep_name: str | None = None
+from app.models.users import User
 from app.models.orders import Order
 from app.models.sp_master import SPNumber
 from app.models.audit_log import AuditLog
 from app.services.order_service import create_order as create_order_service, finalize_order
+from app.services.sp_service import generate_next_sp
 from app.services.trello_service import rebuild_order_checklist, TrelloConfigError, card_exists
 
 
@@ -432,7 +445,7 @@ def search_orders2(
 @router.post("/new", response_model=OrderResponse)
 def create_order(
     request: Request,
-    payload: OrderCreate,
+    payload: OrderCreateWithRep,
     db: Session = Depends(get_db),
     session_user: dict = Depends(require_login),
     initials: str | None = Query(default=None, description="Your initials for audit log (optional)."),
@@ -441,6 +454,51 @@ def create_order(
     default_notes = _default_notes_for_new_order(payload.asset_type, getattr(payload, "notes", None))
     if default_notes is not None:
         payload.notes = default_notes
+
+    # Rep assignment rules:
+
+    # Rep assignment:
+    # Rules:
+    # - Anyone can select any Rep while the order is NOT finalized (including at create time).
+    # - Default is the logged-in user's rep.
+    # - We do NOT trust rep_name from the client; we derive it from the Users table by rep_code.
+    desired_rep_code = (getattr(payload, "rep_code", None) or "").strip() or None
+    desired_rep_name = (getattr(payload, "rep_name", None) or "").strip() or None
+
+    # If only a "RM - Ron Mewis" style name came in, infer rep_code prefix.
+    if (not desired_rep_code) and desired_rep_name:
+        m = re.match(r"^\s*([A-Za-z0-9]{1,6})\s*[-–—]\s*.+$", desired_rep_name)
+        if m:
+            desired_rep_code = m.group(1).strip().upper()
+
+    # Default to session rep if nothing was specified.
+    if not desired_rep_code:
+        desired_rep_code = (session_user.get("rep_code") or "").strip().upper() or None
+    if desired_rep_code:
+        desired_rep_code = desired_rep_code.strip().upper()
+
+    # Validate + derive rep_name from Users table.
+    rep_user = None
+    if desired_rep_code:
+        rep_user = (
+            db.query(User)
+            .filter(func.upper(User.rep_code) == desired_rep_code.upper())
+            .filter(or_(User.is_active.is_(True), User.is_active.is_(None)))
+            .first()
+        )
+
+    if not rep_user:
+        raise HTTPException(status_code=400, detail=f"Unknown rep_code: {desired_rep_code!r}")
+
+    desired_rep_code = (getattr(rep_user, "rep_code", None) or desired_rep_code).strip().upper()
+    desired_rep_name = (getattr(rep_user, "rep_name", None) or desired_rep_code).strip()
+
+    # Force the payload rep fields so the service layer persists them.
+    try:
+        setattr(payload, "rep_code", desired_rep_code)
+        setattr(payload, "rep_name", desired_rep_name)
+    except Exception:
+        pass
 
     created = create_order_service(db, payload)
 
@@ -451,6 +509,15 @@ def create_order(
         .filter(Order.id == created.id)
         .first()
     )
+
+    # Enforce rep fields at the ORM level (service layer may have applied defaults).
+    try:
+        if hasattr(created, "rep_code"):
+            created.rep_code = desired_rep_code
+        if hasattr(created, "rep_name"):
+            created.rep_name = desired_rep_name
+    except Exception:
+        pass
 
 
     _stamp_order_user_ids(created, session_user, created=True)
@@ -476,6 +543,8 @@ def finalize(
         raise HTTPException(status_code=404, detail="Order not found")
 
     before = _order_snapshot(order)
+
+    is_admin = ((session_user or {}).get("role") == "admin")
 
     # Prefer explicit query params; otherwise fall back to stored linkage on the order.
     card_id = (trello_card_id or "").strip() or (getattr(order, "trello_card_id", None) or "").strip()
@@ -804,30 +873,82 @@ def duplicate_order(
     return new_order
 
 
-
-@router.get("/deleted", response_model=OrderSearchResponse)
+@router.get("/deleted")
 def list_deleted_orders(
     request: Request,
     db: Session = Depends(get_db),
-    limit: int = Query(default=200, ge=1, le=1000, description="Max rows to return (pagination)."),
-    offset: int = Query(default=0, ge=0, description="Rows to skip (pagination)."),
-    session_user: dict = Depends(require_admin),
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    session_user: dict = Depends(require_login),
 ):
     """Admin-only: list soft-deleted orders (newest first)."""
-    q = (
-        db.query(Order)
-        .options(joinedload(Order.sp))
-        .filter(Order.deleted_at.isnot(None))
+    if (session_user or {}).get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin required")
+
+    q = db.query(Order).options(joinedload(Order.sp)).filter(
+        or_(Order.is_deleted == True, Order.deleted_at.isnot(None))
     )
 
-    total = q.order_by(None).count()
+    total = q.count()
     items = (
-        q.order_by(Order.id.desc())
-        .offset(offset)
-        .limit(limit)
-        .all()
+        q.order_by(Order.deleted_at.desc())
+         .offset(offset)
+         .limit(limit)
+         .all()
     )
-    return {"total": total, "items": items}
+
+    def _summary(o: Order) -> dict:
+        return {
+            "id": getattr(o, "id", None),
+            "artist": getattr(o, "artist", None),
+            "asset_type": getattr(o, "asset_type", None),
+            "status": getattr(o, "status", None),
+            "deleted_at": getattr(o, "deleted_at", None),
+            "deleted_by": getattr(o, "deleted_by", None),
+        }
+
+    return {"total": total, "items": [_summary(o) for o in items]}
+
+
+@router.post("/{order_id}/restore")
+def restore_deleted_order(
+    request: Request,
+    order_id: int,
+    db: Session = Depends(get_db),
+    session_user: dict = Depends(require_login),
+):
+    """Admin-only: restore a soft-deleted order. Idempotent."""
+    if (session_user or {}).get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin required")
+
+    order = db.query(Order).options(joinedload(Order.sp)).filter(Order.id == order_id).first()
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    # No-op if not deleted
+    if not getattr(order, "is_deleted", False) and getattr(order, "deleted_at", None) is None:
+        return {"status": "noop", "id": order_id}
+
+    before = _order_snapshot(order)
+
+    is_admin = ((session_user or {}).get("role") == "admin")
+
+    if hasattr(order, "is_deleted"):
+        order.is_deleted = False
+    if hasattr(order, "deleted_at"):
+        order.deleted_at = None
+    if hasattr(order, "deleted_by"):
+        order.deleted_by = None
+    if hasattr(order, "deleted_by_user_id"):
+        setattr(order, "deleted_by_user_id", None)
+
+    after = _order_snapshot(order)
+
+    actor = _actor_from_session_or_initials(session_user, None)
+    _audit(db, action="restore", actor=actor, order=order, details={"changes": _diff_dict(before, after, ["is_deleted", "deleted_at", "deleted_by"])})
+
+    db.commit()
+    return {"status": "restored", "id": order_id}
 
 
 @router.get("/{order_id}", response_model=OrderResponse)
@@ -857,77 +978,6 @@ def get_order(
     # FM-style convenience label (non-editable)
     order.parent_display = _parent_display(order)
 
-    return order
-
-
-
-
-@router.post("/{order_id}/restore", response_model=OrderResponse)
-def restore_deleted_order(
-    request: Request,
-    order_id: int,
-    db: Session = Depends(get_db),
-    session_user: dict = Depends(require_admin),
-    initials: str | None = Query(default=None, description="Your initials for audit log (optional)."),
-):
-    """Admin-only: restore a soft-deleted order. This is idempotent."""
-    order = (
-        db.query(Order)
-        .options(joinedload(Order.sp))
-        .filter(Order.id == order_id)
-        .first()
-    )
-    if not order:
-        raise HTTPException(status_code=404, detail="Order not found")
-
-    # If it's not deleted, treat as a no-op.
-    if not getattr(order, "is_deleted", False) and getattr(order, "deleted_at", None) is None:
-        order.parent_display = _parent_display(order)
-        return order
-
-    before = _order_snapshot(order)
-
-    # Clear soft-delete flags
-    try:
-        order.is_deleted = False
-    except Exception:
-        pass
-    try:
-        order.deleted_at = None
-    except Exception:
-        pass
-    try:
-        order.deleted_by = None
-    except Exception:
-        pass
-
-    # If the model has deleted_by_user_id, clear it too.
-    try:
-        if hasattr(order, "deleted_by_user_id"):
-            setattr(order, "deleted_by_user_id", None)
-    except Exception:
-        pass
-
-    _stamp_order_user_ids(order, session_user)
-
-    after = _order_snapshot(order)
-    actor = _actor_from_session_or_initials(session_user, initials)
-    _audit(
-        db,
-        action="restore",
-        actor=actor,
-        order=order,
-        details={
-            "before": before,
-            "after": after,
-            "changes": _diff_dict(before, after, ["is_deleted", "deleted_at", "deleted_by"]),
-        },
-    )
-
-    db.commit()
-    db.refresh(order)
-
-    order.parent_display = _parent_display(order)
     return order
 
 
@@ -980,7 +1030,7 @@ def delete_order(
 def update_order(
     request: Request,
     order_id: int,
-    payload: OrderUpdate,
+    payload: OrderUpdateWithRep,
     override: bool = Query(default=False, description="Allow override edit on finalized orders (unfinalizes to draft)."),
     db: Session = Depends(get_db),
     session_user: dict = Depends(require_login),
@@ -995,6 +1045,8 @@ def update_order(
 
     before = _order_snapshot(order)
 
+    was_finalized = ((order.status or 'draft').strip().lower() == 'finalized')
+
     # Track which fields were updated (for audit).
     touched_fields: list[str] = []
 
@@ -1003,6 +1055,7 @@ def update_order(
     # - Allowed for finalized orders ONLY when override=true
     # - Always keep SP.order_type (and Order.order_type if present) in sync
     if payload.asset_type is not None and payload.asset_type != order.asset_type:
+        old_asset = (getattr(order, "asset_type", "") or "").strip().lower()
         new_asset = (payload.asset_type or "").strip().lower()
         if new_asset not in {"radio", "video", "art"}:
             raise HTTPException(status_code=400, detail="asset_type must be one of: radio, video, art")
@@ -1014,8 +1067,9 @@ def update_order(
         order.asset_type = new_asset
         touched_fields.append("asset_type")
 
-        # Keep SP order_type in sync if present
-        if getattr(order, "sp", None) is not None:
+        # Keep SP order_type in sync ONLY for radio/video.
+        # If switching to ART, we intentionally do NOT mutate the SP row; ART orders don't use SP numbers.
+        if new_asset in {"radio", "video"} and getattr(order, "sp", None) is not None:
             try:
                 order.sp.order_type = new_asset
             except Exception:
@@ -1026,6 +1080,36 @@ def update_order(
             try:
                 order.order_type = new_asset
                 touched_fields.append("order_type")
+            except Exception:
+                pass
+
+
+        # If switching INTO radio/video from ART (or any SP-less state), assign an SP# immediately.
+        # This prevents "Art -> Radio/Video" orders from remaining SP-less forever.
+        if new_asset in {"radio", "video"} and getattr(order, "sp_id", None) is None:
+            try:
+                sp_rec = generate_next_sp(db, new_asset)
+                order.sp_id = sp_rec.id
+                touched_fields.append("sp_id")
+                # Attach relationship for immediate use (best-effort)
+                try:
+                    order.sp = sp_rec  # type: ignore[attr-defined]
+                except Exception:
+                    pass
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=f"Failed to assign SP number: {e}")
+
+        # If switching INTO ART from radio/video, clear any existing SP linkage immediately.
+        # ART orders must NOT carry an SP number. It's fine for sp_id to be blank until (re)finalize.
+        if new_asset == "art" and getattr(order, "sp_id", None) is not None:
+            try:
+                order.sp_id = None
+                touched_fields.append("sp_id")
+            except Exception:
+                pass
+            # Best-effort: detach relationship cache so API responses don't show a stale sp_number.
+            try:
+                order.sp = None  # type: ignore[attr-defined]
             except Exception:
                 pass
 
@@ -1041,15 +1125,94 @@ def update_order(
         except Exception:
             pass
 
-    # finalized orders are read-only unless override=true
-    if (order.status or "draft") == "finalized" and not override:
-        raise HTTPException(status_code=400, detail="order is finalized; use override=true to edit")
+    # finalized orders are read-only unless override=true,
+    # EXCEPT: Rep can be changed on a finalized order by ADMIN (without unfinalizing).
+    incoming_rep_code = (getattr(payload, "rep_code", None) or "").strip() or None
+    incoming_rep_name = (getattr(payload, "rep_name", None) or "").strip() or None
+    is_admin = ((session_user or {}).get("role") == "admin")
 
-    # Apply allowed field updates (only if provided)
+    # Detect whether the request is trying to change any non-rep fields.
+    # (We use the BEFORE snapshot for asset_type because the asset_type block above may have already applied changes.)
+    nonrep_asset_change = False
+    try:
+        if getattr(payload, "asset_type", None) is not None:
+            old_asset = (before.get("asset_type") or "").strip().lower()
+            new_asset = (str(getattr(payload, "asset_type") or "")).strip().lower()
+            nonrep_asset_change = (new_asset != old_asset)
+    except Exception:
+        nonrep_asset_change = False
+
+    nonrep_other_change = False
+    for _f in [
+        "artist",
+        "notes",
+        "client_name",
+        "client_company_name",
+        "order_type",
+        "description",
+        "length",
+        "instructions",
+        "is_revision",
+        "parent_order_id",
+        "revision_of",
+    ]:
+        try:
+            if getattr(payload, _f, None) is not None:
+                nonrep_other_change = True
+                break
+        except Exception:
+            pass
+
+    wants_rep_change = bool(incoming_rep_code or incoming_rep_name)
+    wants_nonrep_change = bool(nonrep_asset_change or nonrep_other_change)
+
+    if was_finalized and (not override):
+        # Finalized orders:
+        # - If you're changing anything besides rep, you need override=true.
+        # - If you're changing rep, only admin can do it (and we do NOT unfinalize).
+        if wants_nonrep_change:
+            raise HTTPException(status_code=400, detail="order is finalized; use override=true to edit")
+        if wants_rep_change and (not is_admin):
+            raise HTTPException(status_code=403, detail="Admin required to change rep on a finalized order")
+        # else: no-op OR admin-only rep change is allowed
+
+    elif was_finalized and override and wants_rep_change and (not is_admin):
+        # Prevent rep changes via override shenanigans.
+        raise HTTPException(status_code=403, detail="Admin required to change rep on a finalized order")
+
+    # Rep reassignment:
+    # - Allowed for ANY user when the order is NOT finalized
+    # - Allowed for ADMIN when the order IS finalized
+    if wants_rep_change:
+        # Infer code from a "RM - Ron Mewis" style rep_name if needed.
+        if (not incoming_rep_code) and incoming_rep_name:
+            m = re.match(r"^\s*([A-Za-z0-9]{1,6})\s*[-–—]\s*.+$", incoming_rep_name)
+            if m:
+                incoming_rep_code = m.group(1).strip().upper()
+
+        if incoming_rep_code:
+            incoming_rep_code = incoming_rep_code.strip().upper()
+
+        if not incoming_rep_code:
+            raise HTTPException(status_code=400, detail="rep_code is required to change rep")
+
+        rep_user = (
+            db.query(User)
+            .filter(func.upper(User.rep_code) == incoming_rep_code.upper())
+            .filter(or_(User.is_active.is_(True), User.is_active.is_(None)))
+            .first()
+        )
+        if not rep_user:
+            raise HTTPException(status_code=400, detail=f"Unknown rep_code: {incoming_rep_code!r}")
+
+        order.rep_code = (getattr(rep_user, "rep_code", None) or incoming_rep_code).strip().upper()
+        order.rep_name = (getattr(rep_user, "rep_name", None) or order.rep_code).strip()
+        touched_fields.append("rep_code")
+        touched_fields.append("rep_name")
+
+    # Apply allowed field updates (only if provided) (only if provided)
     for field in [
         "artist",
-        "rep_name",
-        "rep_code",
         "notes",
         "client_name",
         "client_company_name",
@@ -1090,9 +1253,9 @@ def update_order(
             "after": after,
             "changes": _diff_dict(before, after, [
                 "artist",
-                "rep_name",
-                "rep_code",
                 "asset_type",
+                "rep_code",
+                "rep_name",
                 "notes",
                 "client_name",
                 "client_company_name",

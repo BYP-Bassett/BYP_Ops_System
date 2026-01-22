@@ -770,6 +770,60 @@ def admin_deleted_orders_page(request: Request, msg: str | None = None, err: str
     return HTMLResponse(content=html)
 
 
+# ---- Users JSON (for Rep picker, etc.) ----
+@app.get("/users.json", include_in_schema=False)
+def users_json(request: Request):
+    # Auth required.
+    if not _is_logged_in(request):
+        return JSONResponse(status_code=401, content={"detail": "Not authenticated"})
+
+    db = SessionLocal()
+    try:
+        users = (
+            db.query(User)
+            .filter((User.is_active.is_(True)) | (User.is_active.is_(None)))
+            .order_by(User.rep_code.asc())
+            .all()
+        )
+        out = []
+        for u in users:
+            out.append({
+                "rep_code": str(getattr(u, "rep_code", "") or "").strip(),
+                "rep_name": str(getattr(u, "rep_name", "") or "").strip(),
+                "username": str(getattr(u, "username", "") or "").strip(),
+            })
+        return JSONResponse(content={"users": out})
+    finally:
+        db.close()
+
+
+@app.get("/admin/users.json", include_in_schema=False)
+def admin_users_json(request: Request):
+    # Admin required.
+    if not _is_logged_in(request):
+        return JSONResponse(status_code=401, content={"detail": "Not authenticated"})
+    if not _is_admin(request):
+        return JSONResponse(status_code=403, content={"detail": "Admin required"})
+
+    db = SessionLocal()
+    try:
+        users = db.query(User).order_by(User.id.asc()).all()
+        out = []
+        for u in users:
+            out.append({
+                "id": int(getattr(u, "id", 0) or 0),
+                "username": str(getattr(u, "username", "") or ""),
+                "rep_code": str(getattr(u, "rep_code", "") or ""),
+                "rep_name": str(getattr(u, "rep_name", "") or ""),
+                "role": str(getattr(u, "role", "") or ""),
+                "is_active": bool(getattr(u, "is_active", True)),
+                "email": str(getattr(u, "email", "") or "") if hasattr(u, "email") else "",
+            })
+        return JSONResponse(content={"users": out})
+    finally:
+        db.close()
+
+
 @app.post("/admin/deleted-orders/{order_id}/restore", include_in_schema=False)
 def admin_deleted_orders_restore(request: Request, order_id: int):
     gate = _require_admin_or_redirect(request)
@@ -991,6 +1045,7 @@ def web_order_detail(request: Request, order_id: int):
     <div class="card">
       <h2>Rep</h2>
       <table><tbody id="repRows"></tbody></table>
+      <div class="hint">Anyone can change Rep until finalized. After finalized, only admins can change.</div>
     </div>
   </div>
 
@@ -1020,7 +1075,17 @@ def web_order_detail(request: Request, order_id: int):
 
       var trelloCardId = "";
 
+      // Who am I
+      var meInfo = null;
+      var isAdminUser = false;
 
+      // Rep picker
+      var reps = null; // array of {id,username,rep_code,rep_name,role,is_active}
+      var repCodeToName = {};
+      var repSelect = null;
+      var repNameDisplay = null;
+
+      var isFinalNow = false;
 
       var deleteBtn = document.getElementById("deleteBtn");
 
@@ -1045,7 +1110,9 @@ var orderRows = document.getElementById("orderRows");
         asset_type: "",
         notes: "",
         client_name: "",
-        client_company_name: ""
+        client_company_name: "",
+        rep_code: "",
+        rep_name: ""
       };
       // Autosave state
       var autoSaveTimer = null;
@@ -1190,8 +1257,14 @@ var orderRows = document.getElementById("orderRows");
         // Populate options
         for (var i = 0; i < options.length; i++) {
           var opt = document.createElement("option");
-          opt.value = options[i];
-          opt.textContent = options[i];
+          var v = options[i];
+          var label = options[i];
+          if (typeof options[i] === "object" && options[i] !== null) {
+            v = options[i].value;
+            label = options[i].label;
+          }
+          opt.value = v;
+          opt.textContent = label;
           sel.appendChild(opt);
         }
 
@@ -1297,7 +1370,9 @@ var orderRows = document.getElementById("orderRows");
           asset_type: normalize(assetTypeSelect ? assetTypeSelect.value : ""),
           notes: normalize(notesInput ? notesInput.value : ""),
           client_name: normalize(clientNameInput ? clientNameInput.value : ""),
-          client_company_name: normalize(clientCompanyInput ? clientCompanyInput.value : "")
+          client_company_name: normalize(clientCompanyInput ? clientCompanyInput.value : ""),
+          rep_code: normalize(repSelect ? repSelect.value : baseline.rep_code),
+          rep_name: normalize(repNameDisplay ? repNameDisplay.value : baseline.rep_name)
         };
       }
 
@@ -1306,10 +1381,11 @@ var orderRows = document.getElementById("orderRows");
         if (notesInput) notesInput.value = baseline.notes;
         if (clientNameInput) clientNameInput.value = baseline.client_name;
         if (clientCompanyInput) clientCompanyInput.value = baseline.client_company_name;
+        if (repSelect) repSelect.value = baseline.rep_code;
+        if (repNameDisplay) repNameDisplay.value = baseline.rep_name;
       }
 
-      function isDirty() {
-        var d = getDraft();
+      function isDirtyCore(d) {
         return (
           d.asset_type !== baseline.asset_type ||
           d.notes !== baseline.notes ||
@@ -1318,21 +1394,54 @@ var orderRows = document.getElementById("orderRows");
         );
       }
 
+      function isDirtyRep(d) {
+        return (
+          d.rep_code !== baseline.rep_code ||
+          d.rep_name !== baseline.rep_name
+        );
+      }
+
+      function isDirty() {
+        var d = getDraft();
+        return isDirtyCore(d) || isDirtyRep(d);
+      }
+
+      function canEditCore() {
+        return !!isDraftNow;
+      }
+
+      function canEditRep() {
+        return !!isAdminUser && !isFinalNow;
+      }
+
       function refreshDirtyUI() {
-        var dirty = isDirty();
-        if (isDraftNow) {
-          // Keep Save enabled for draft orders (even if nothing changed yet).
+        var d = getDraft();
+        var dirtyCore = isDirtyCore(d);
+        var dirtyRep = isDirtyRep(d);
+        var dirtyAny = dirtyCore || dirtyRep;
+
+        var canCore = canEditCore();
+        var canRep = canEditRep();
+
+        // Save rules:
+        // - Draft orders: Save enabled (even if nothing changed yet).
+        // - Non-draft: only enable Save if admin is changing rep and the order is not finalized.
+        if (canCore) {
           saveBtn.disabled = false;
+        } else if (canRep) {
+          saveBtn.disabled = !dirtyRep;
         } else {
           saveBtn.disabled = true;
         }
-        resetBtn.disabled = !dirty;
+
+        resetBtn.disabled = !dirtyAny;
       }
 
       function scheduleAutoSave() {
         if (!hasLoadedOnce) return;
-        if (!isDraftNow) return;
-        if (!isDirty()) return;
+        if (!canEditCore()) return;
+        var d = getDraft();
+        if (!isDirtyCore(d)) return;
         if (autoSaveTimer) clearTimeout(autoSaveTimer);
         autoSaveTimer = setTimeout(function() {
           saveAsync(true);
@@ -1345,11 +1454,21 @@ var orderRows = document.getElementById("orderRows");
           fn();
           return;
         }
-        // If user is editing a non-draft, don't silently spam the API.
-        if (!isDraftNow) {
+
+        var d = getDraft();
+        var dirtyCore = isDirtyCore(d);
+        var dirtyRep = isDirtyRep(d);
+
+        if (dirtyCore && !canEditCore()) {
           errEl.textContent = "This order isn't in DRAFT. Use Override Edit first.";
           return;
         }
+
+        if (dirtyRep && !canEditRep()) {
+          errEl.textContent = "Rep can only be changed by Admin, and only when NOT finalized.";
+          return;
+        }
+
         saveAsync(false).then(function(ok) {
           if (ok) fn();
         });
@@ -1374,65 +1493,81 @@ var orderRows = document.getElementById("orderRows");
       function saveAsync(quiet) {
         clearMsgs();
         if (isSaving) return Promise.resolve(false);
-        if (!isDraftNow) {
+
+        var d = getDraft();
+        var dirtyCore = isDirtyCore(d);
+        var dirtyRep = isDirtyRep(d);
+
+        if (dirtyCore && !canEditCore()) {
           if (!quiet) errEl.textContent = "This order isn't in DRAFT. Use Override Edit first.";
           return Promise.resolve(false);
+        }
+
+        if (dirtyRep && !canEditRep()) {
+          if (!quiet) errEl.textContent = "Rep can only be changed by Admin, and only when NOT finalized.";
+          return Promise.resolve(false);
+        }
+
+        // Nothing to save (common for non-draft view)
+        if (!dirtyCore && !dirtyRep && !canEditCore()) {
+          return Promise.resolve(true);
         }
 
         isSaving = true;
         setBusy(quiet ? "Autosaving…" : "Saving…");
         saveBtn.disabled = true;
 
-        var d = getDraft();
-        var payload = {
-          notes: d.notes,
-          client_name: d.client_name,
-          client_company_name: d.client_company_name
-        };
+        var payload = {};
 
-        // Only send asset_type when it actually changed (avoids 400s on finalized orders).
-        if (d.asset_type !== baseline.asset_type) {
-          payload.asset_type = d.asset_type;
+        if (dirtyCore) {
+          payload.notes = d.notes;
+          payload.client_name = d.client_name;
+          payload.client_company_name = d.client_company_name;
+
+          // Only send asset_type when it actually changed (avoids 400s on finalized orders).
+          if (d.asset_type !== baseline.asset_type) {
+            payload.asset_type = d.asset_type;
+          }
         }
 
-        return fetch("/orders/" + ORDER_ID, {
-          credentials: "same-origin",
+        if (dirtyRep) {
+          payload.rep_code = d.rep_code;
+          payload.rep_name = d.rep_name;
+        }
+
+        return fetch("/orders/__ORDER_ID__", {
           method: "PATCH",
+          credentials: "same-origin",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload)
-        })
-        .then(function(res) {
+        }).then(function(res) {
           return res.text().then(function(text) {
+            var data = null;
+            try { data = JSON.parse(text); } catch (e) {}
             if (!res.ok) {
-              setBusy("");
-              errEl.textContent = "HTTP " + res.status + "\\n" + text;
-              refreshDirtyUI();
+              if (!quiet) errEl.textContent = (data && (data.detail || data.error)) ? (data.detail || data.error) : ("Save failed (" + res.status + ")");
               return false;
             }
-
             // Update baseline locally so closing/finalizing won't lose changes.
             baseline = {
               asset_type: d.asset_type,
               notes: d.notes,
               client_name: d.client_name,
-              client_company_name: d.client_company_name
+              client_company_name: d.client_company_name,
+              rep_code: d.rep_code,
+              rep_name: d.rep_name
             };
-
-            okEl.textContent = quiet ? "Autosaved." : "Saved.";
+            okEl.textContent = quiet ? "" : "Saved.";
             refreshDirtyUI();
-            hasLoadedOnce = true;
-            setBusy("Loaded.");
             return true;
           });
-        })
-        .catch(function(e) {
-          setBusy("");
-          errEl.textContent = String(e);
-          refreshDirtyUI();
+        }).catch(function(err) {
+          if (!quiet) errEl.textContent = "Save error: " + (err && err.message ? err.message : String(err));
           return false;
-        })
-        .finally(function() {
+        }).finally(function() {
           isSaving = false;
+          setBusy("");
+          refreshDirtyUI();
         });
       }
 
@@ -1682,17 +1817,68 @@ function load() {
             addRow(clientRows, "Client Phone", data.client_phone);
 
             // ----- Rep section -----
-            renderSection(repRows, data, [
-              { label: "Rep Code", key: "rep_code" },
-              { label: "Rep Name", key: "rep_name" }
-            ]);
+            repRows.innerHTML = "";
+            var currentRepCode = normalize(data.rep_code);
+            var currentRepName = normalize(data.rep_name);
+
+            // Determine finalized (rep changes blocked if finalized)
+            var isFinal = false;
+            if (data && data.finalized_at) {
+              isFinal = true;
+            } else if (data && data.status) {
+              var s2 = String(data.status).toLowerCase();
+              if (s2.indexOf("final") >= 0) isFinal = true;
+            }
+            isFinalNow = isFinal;
+
+            if (((!isFinalNow) || isAdminUser) && reps && Array.isArray(reps) && reps.length) {
+              // Build rep options
+              var opts = [];
+              for (var ri = 0; ri < reps.length; ri++) {
+                var u = reps[ri] || {};
+                var rc = normalize(u.rep_code).trim();
+                var rn = normalize(u.rep_name).trim();
+                var label = rc;
+                if (rn) label = rc + " - " + rn;
+                opts.push({ value: rc, label: label });
+              }
+
+              // Ensure current rep is selectable even if missing from list
+              if (currentRepCode && !repCodeToName[currentRepCode]) {
+                opts.unshift({ value: currentRepCode, label: currentRepCode + (currentRepName ? (" - " + currentRepName) : "") });
+                repCodeToName[currentRepCode] = currentRepName;
+              }
+
+              repSelect = addSelectRow(repRows, "Rep", "editRepCode", opts);
+              repNameDisplay = addInputRow(repRows, "Rep Name", "editRepName", "text");
+              repNameDisplay.disabled = true;
+
+              repSelect.value = currentRepCode || "";
+              repNameDisplay.value = currentRepName || "";
+
+              repSelect.addEventListener("change", function() {
+                var rc2 = normalize(repSelect.value).trim();
+                var rn2 = repCodeToName[rc2] || "";
+                if (repNameDisplay) repNameDisplay.value = rn2;
+                okEl.textContent = "";
+                refreshDirtyUI();
+              });
+            } else {
+              // Read-only view
+              repSelect = null;
+              repNameDisplay = null;
+              addRow(repRows, "Rep Code", currentRepCode);
+              addRow(repRows, "Rep Name", currentRepName);
+            }
 
             // Baseline values
             baseline = {
               asset_type: normalize(data.asset_type).toLowerCase(),
               notes: normalize(data.notes),
               client_name: normalize(data.client_name),
-              client_company_name: normalize(data.client_company_name)
+              client_company_name: normalize(data.client_company_name),
+              rep_code: currentRepCode,
+              rep_name: currentRepName
             };
             setDraftFromBaseline();
 
@@ -1727,17 +1913,14 @@ function load() {
             if (clientNameInput) clientNameInput.disabled = !isDraft;
             if (clientCompanyInput) clientCompanyInput.disabled = !isDraft;
 
-            // Finalize/Unfinalize: best-effort based on finalized_at or status text
-            var isFinal = false;
-            if (data && data.finalized_at) {
-              isFinal = true;
-            } else if (data && data.status) {
-              var s = String(data.status).toLowerCase();
-              if (s.indexOf("final") >= 0) isFinal = true;
+            // Rep picker is admin-only and blocked if finalized
+            if (repSelect) {
+              repSelect.disabled = !(isAdminUser && !isFinalNow);
             }
 
-            finalizeBtn.disabled = isFinal;
-            unfinalizeBtn.disabled = !isFinal;
+            // Finalize/Unfinalize
+            finalizeBtn.disabled = isFinalNow;
+            unfinalizeBtn.disabled = !isFinalNow;
 
             refreshDirtyUI();
             setBusy("Loaded.");
@@ -1748,8 +1931,64 @@ function load() {
           });
       }
 
-      wireCopyWidget();
-      load();
+      function fetchMe() {
+        return fetch("/me", { credentials: "same-origin" })
+          .then(function(res) {
+            return res.text().then(function(t) {
+              try { return JSON.parse(t); } catch (e) { return null; }
+            });
+          })
+          .then(function(info) {
+            meInfo = info;
+            isAdminUser = !!(info && info.authenticated && String(info.role || "").toLowerCase() === "admin");
+            return info;
+          })
+          .catch(function() { meInfo = null; isAdminUser = false; return null; });
+      }
+
+      function fetchReps() {
+        return fetch("/users.json", { credentials: "same-origin" })
+          .then(function(res) {
+            return res.text().then(function(text) {
+              if (!res.ok) return null;
+              try { return JSON.parse(text); } catch (e) { return null; }
+            });
+          })
+          .then(function(data) {
+            reps = (data && data.users) ? data.users : data;
+            if (!Array.isArray(reps)) reps = [];
+            repCodeToName = {};
+            var filtered = [];
+            for (var i = 0; i < reps.length; i++) {
+              var u = reps[i] || {};
+              if (u.is_active === false) continue;
+              var rc = normalize(u.rep_code).trim();
+              if (!rc) continue;
+              var rn = normalize(u.rep_name).trim();
+              repCodeToName[rc] = rn;
+              filtered.push(u);
+            }
+            reps = filtered;
+            reps.sort(function(a, b) {
+              var ar = normalize(a.rep_code).toUpperCase();
+              var br = normalize(b.rep_code).toUpperCase();
+              if (ar < br) return -1;
+              if (ar > br) return 1;
+              return 0;
+            });
+            return reps;
+          })
+          .catch(function() { reps = []; repCodeToName = {}; return null; });
+      }
+
+      function init() {
+        wireCopyWidget();
+        fetchMe()
+          .then(fetchReps)
+          .then(function() { load(); });
+      }
+
+      init();
     })();
   </script>
 </body>
