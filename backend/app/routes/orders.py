@@ -20,7 +20,7 @@ def _audit_details(order, details=None):
 
 
 import datetime
-from sqlalchemy import or_, func
+from sqlalchemy import or_, func, case
 from sqlalchemy.orm import Session, joinedload
 
 from app.database.session import get_db
@@ -31,15 +31,18 @@ from app.schemas.order import OrderCreate, OrderUpdate, OrderResponse
 class OrderCreateWithRep(OrderCreate):
     rep_code: str | None = None
     rep_name: str | None = None
+    client_id: int | None = None
 
 # Allow rep reassignment on existing (non-finalized) orders via PATCH.
 class OrderUpdateWithRep(OrderUpdate):
     rep_code: str | None = None
     rep_name: str | None = None
-from app.models.users import User
+    client_id: int | None = None
 from app.models.orders import Order
+from app.models.users import User
 from app.models.sp_master import SPNumber
 from app.models.audit_log import AuditLog
+from app.models.clients import Client
 from app.services.order_service import create_order as create_order_service, finalize_order
 from app.services.sp_service import generate_next_sp
 from app.services.trello_service import rebuild_order_checklist, TrelloConfigError, card_exists
@@ -130,6 +133,31 @@ def _stamp_order_user_ids(order: Order, session_user: dict | None, *, created: b
         # never let audit stamping break endpoint behavior
         return
 
+
+
+class ClientSuggestItem(BaseModel):
+    id: int
+    client_name: str
+    company_name: str | None = None
+
+
+class ClientResponse(BaseModel):
+    id: int
+    client_name: str
+    company_name: str | None = None
+    is_active: bool
+
+
+class ClientCreate(BaseModel):
+    client_name: str
+    company_name: str | None = None
+    is_active: bool | None = True
+
+
+class ClientUpdate(BaseModel):
+    client_name: str | None = None
+    company_name: str | None = None
+    is_active: bool | None = None
 
 
 class OrderSearchResponse(BaseModel):
@@ -361,6 +389,37 @@ def _orders_search_query(
         q = q.filter(Order.client_company_name.ilike(f"%{company_q}%"))
 
     return q
+def _apply_client_snapshot(db: Session, order: Order, client_id: int) -> None:
+    """Set order.client_id and snapshot client_name/company from clients table.
+
+    IMPORTANT: If the selected Client row has a blank company_name, but the Order currently
+    has a non-blank client_company_name (user typed it / UI filled it), we "heal" the Client
+    row by writing that company_name back to the Client before snapshotting. This prevents
+    poisoned client rows from forever forcing company_name back to blank.
+    """
+    client = db.query(Client).filter(Client.id == client_id).first()
+    if not client:
+        raise HTTPException(status_code=404, detail="Client not found")
+    if getattr(client, "is_active", True) is False:
+        # still allow selecting inactive? keep strict for now
+        raise HTTPException(status_code=400, detail="Client is inactive")
+
+    incoming_company = (getattr(order, "client_company_name", None) or "").strip() or None
+    if incoming_company:
+        existing_company = (getattr(client, "company_name", None) or "").strip() or None
+        if not existing_company:
+            try:
+                client.company_name = incoming_company
+                db.flush()
+            except Exception:
+                # never block snapshot behavior
+                pass
+
+    order.client_id = client.id
+    # Snapshot fields used in UI/export/emails (do NOT rewrite history later)
+    order.client_name = client.client_name
+    order.client_company_name = getattr(client, "company_name", None)
+
 
 @router.get("/search", response_model=list[OrderResponse])
 def search_orders(
@@ -372,8 +431,11 @@ def search_orders(
     sp_number: str | None = Query(default=None, description="SP number contains (case-insensitive)."),
     client_name: str | None = Query(default=None, description="Client name contains (case-insensitive)."),
     client_company_name: str | None = Query(default=None, description="Client company contains (case-insensitive)."),
+    client_company: str | None = Query(default=None, description="Client company contains (case-insensitive). (legacy param name)"),
     status: str | None = Query(default=None, description="draft or finalized"),
     rep_code: str | None = Query(default=None, description="Rep initials equals (e.g., SB)."),
+    limit: int = Query(default=200, ge=1, le=1000, description="Max rows to return (pagination)."),
+    offset: int = Query(default=0, ge=0, description="Rows to skip (pagination)."),
     include_deleted: bool = Query(default=False, description="Include soft-deleted orders (admin use)."),
     session_user: dict = Depends(require_login),
 ):
@@ -441,6 +503,202 @@ def search_orders2(
     return {"total": total, "items": items}
 
 
+# ---------------- Clients (fast version: company_name is plain text) ----------------
+
+@router.get("/clients/suggest", response_model=list[ClientSuggestItem])
+def clients_suggest(
+    request: Request,
+    q: str = Query(..., min_length=1, description="Client name search."),
+    limit: int = Query(default=10, ge=1, le=50),
+    include_inactive: bool = Query(default=False, description="Include inactive clients (admin use)."),
+    db: Session = Depends(get_db),
+    session_user: dict = Depends(require_login),
+):
+    qq = (q or "").strip()
+    if not qq:
+        return []
+
+    if include_inactive and (session_user or {}).get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin required for include_inactive")
+
+    qry = db.query(Client)
+    if not include_inactive:
+        qry = qry.filter(or_(Client.is_active == True, Client.is_active.is_(None)))
+
+    # Case-insensitive contains search
+    like = f"%{qq}%"
+    qry = qry.filter(Client.client_name.ilike(like))
+
+    rows = (
+        qry.order_by(func.lower(Client.client_name).asc(), case((Client.company_name.is_(None), 1), else_=0).asc(), Client.id.asc())
+        .limit(limit)
+        .all()
+    )
+
+    return [
+        {
+            "id": r.id,
+            "client_name": r.client_name,
+            "company_name": getattr(r, "company_name", None),
+        }
+        for r in rows
+    ]
+
+
+@router.get("/clients/{client_id}", response_model=ClientResponse)
+def get_client(
+    request: Request,
+    client_id: int,
+    db: Session = Depends(get_db),
+    session_user: dict = Depends(require_login),
+):
+    c = db.query(Client).filter(Client.id == client_id).first()
+    if not c:
+        raise HTTPException(status_code=404, detail="Client not found")
+    return {
+        "id": c.id,
+        "client_name": c.client_name,
+        "company_name": getattr(c, "company_name", None),
+        "is_active": bool(getattr(c, "is_active", True)),
+    }
+
+
+@router.post("/clients", response_model=ClientResponse)
+def create_client(
+    request: Request,
+    payload: ClientCreate,
+    db: Session = Depends(get_db),
+    session_user: dict = Depends(require_admin),
+):
+    name = (payload.client_name or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="client_name is required")
+
+    company = (payload.company_name or "").strip() or None
+
+    # 1) Exact match: same client_name + same company_name (case-insensitive).
+    if company:
+        exact = (
+            db.query(Client)
+            .filter(func.lower(func.trim(Client.client_name)) == name.lower())
+            .filter(func.lower(func.trim(Client.company_name)) == company.lower())
+            .first()
+        )
+        if exact:
+            if payload.is_active is not None:
+                try:
+                    exact.is_active = bool(payload.is_active)
+                except Exception:
+                    pass
+                db.commit()
+                db.refresh(exact)
+            return {
+                "id": exact.id,
+                "client_name": exact.client_name,
+                "company_name": getattr(exact, "company_name", None),
+                "is_active": bool(getattr(exact, "is_active", True)),
+            }
+
+        # 2) Poisoned match: same client_name exists but has blank/NULL company_name.
+        # If the user supplies a company now, update the existing row instead of returning a forever-blank client.
+        poisoned = (
+            db.query(Client)
+            .filter(func.lower(func.trim(Client.client_name)) == name.lower())
+            .filter(or_(Client.company_name.is_(None), func.trim(Client.company_name) == ""))
+            .order_by(Client.id.asc())
+            .first()
+        )
+        if poisoned:
+            poisoned.company_name = company
+            if payload.is_active is not None:
+                try:
+                    poisoned.is_active = bool(payload.is_active)
+                except Exception:
+                    pass
+            db.commit()
+            db.refresh(poisoned)
+            return {
+                "id": poisoned.id,
+                "client_name": poisoned.client_name,
+                "company_name": getattr(poisoned, "company_name", None),
+                "is_active": bool(getattr(poisoned, "is_active", True)),
+            }
+
+    # 3) If company wasn't provided, avoid making duplicates: return the best existing match (prefer non-null company).
+    if not company:
+        existing_any = (
+            db.query(Client)
+            .filter(func.lower(func.trim(Client.client_name)) == name.lower())
+            .order_by(case((Client.company_name.is_(None), 1), else_=0).asc(), Client.id.asc())
+            .first()
+        )
+        if existing_any:
+            if payload.is_active is not None:
+                try:
+                    existing_any.is_active = bool(payload.is_active)
+                except Exception:
+                    pass
+                db.commit()
+                db.refresh(existing_any)
+            return {
+                "id": existing_any.id,
+                "client_name": existing_any.client_name,
+                "company_name": getattr(existing_any, "company_name", None),
+                "is_active": bool(getattr(existing_any, "is_active", True)),
+            }
+
+    # 4) Create a new client row.
+    c = Client(
+        client_name=name,
+        company_name=company,
+        is_active=(payload.is_active if payload.is_active is not None else True),
+    )
+    db.add(c)
+    db.commit()
+    db.refresh(c)
+    return {
+        "id": c.id,
+        "client_name": c.client_name,
+        "company_name": getattr(c, "company_name", None),
+        "is_active": bool(getattr(c, "is_active", True)),
+    }
+
+
+@router.patch("/clients/{client_id}", response_model=ClientResponse)
+def update_client(
+    request: Request,
+    client_id: int,
+    payload: ClientUpdate,
+    db: Session = Depends(get_db),
+    session_user: dict = Depends(require_admin),
+):
+    c = db.query(Client).filter(Client.id == client_id).first()
+    if not c:
+        raise HTTPException(status_code=404, detail="Client not found")
+
+    if payload.client_name is not None:
+        name = (payload.client_name or "").strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="client_name cannot be blank")
+        c.client_name = name
+
+    if payload.company_name is not None:
+        c.company_name = (payload.company_name or "").strip() or None
+
+    if payload.is_active is not None:
+        c.is_active = bool(payload.is_active)
+
+    db.commit()
+    db.refresh(c)
+    return {
+        "id": c.id,
+        "client_name": c.client_name,
+        "company_name": getattr(c, "company_name", None),
+        "is_active": bool(getattr(c, "is_active", True)),
+    }
+
+
+
 
 @router.post("/new", response_model=OrderResponse)
 def create_order(
@@ -458,15 +716,13 @@ def create_order(
     # Rep assignment rules:
 
     # Rep assignment:
-    # Rules:
-    # - Anyone can select any Rep while the order is NOT finalized (including at create time).
-    # - Default is the logged-in user's rep.
-    # - We do NOT trust rep_name from the client; we derive it from the Users table by rep_code.
+    # - If rep_code/rep_name is provided, we accept it (used when creating an order for another rep).
+    # - If omitted, default to the logged-in user’s rep_code/rep_name.
     desired_rep_code = (getattr(payload, "rep_code", None) or "").strip() or None
     desired_rep_name = (getattr(payload, "rep_name", None) or "").strip() or None
 
     # If only a "RM - Ron Mewis" style name came in, infer rep_code prefix.
-    if (not desired_rep_code) and desired_rep_name:
+    if not desired_rep_code and desired_rep_name:
         m = re.match(r"^\s*([A-Za-z0-9]{1,6})\s*[-–—]\s*.+$", desired_rep_name)
         if m:
             desired_rep_code = m.group(1).strip().upper()
@@ -474,24 +730,12 @@ def create_order(
     # Default to session rep if nothing was specified.
     if not desired_rep_code:
         desired_rep_code = (session_user.get("rep_code") or "").strip().upper() or None
+    if not desired_rep_name:
+        desired_rep_name = (session_user.get("rep_name") or "").strip() or (desired_rep_code or None)
+
+    # Normalize
     if desired_rep_code:
         desired_rep_code = desired_rep_code.strip().upper()
-
-    # Validate + derive rep_name from Users table.
-    rep_user = None
-    if desired_rep_code:
-        rep_user = (
-            db.query(User)
-            .filter(func.upper(User.rep_code) == desired_rep_code.upper())
-            .filter(or_(User.is_active.is_(True), User.is_active.is_(None)))
-            .first()
-        )
-
-    if not rep_user:
-        raise HTTPException(status_code=400, detail=f"Unknown rep_code: {desired_rep_code!r}")
-
-    desired_rep_code = (getattr(rep_user, "rep_code", None) or desired_rep_code).strip().upper()
-    desired_rep_name = (getattr(rep_user, "rep_name", None) or desired_rep_code).strip()
 
     # Force the payload rep fields so the service layer persists them.
     try:
@@ -510,15 +754,18 @@ def create_order(
         .first()
     )
 
-    # Enforce rep fields at the ORM level (service layer may have applied defaults).
-    try:
-        if hasattr(created, "rep_code"):
-            created.rep_code = desired_rep_code
-        if hasattr(created, "rep_name"):
-            created.rep_name = desired_rep_name
-    except Exception:
-        pass
 
+    # Client snapshot wiring: if client_id provided, link + snapshot from clients table.
+    payload_client_id = getattr(payload, "client_id", None)
+    if payload_client_id is not None:
+        try:
+            _apply_client_snapshot(db, created, int(payload_client_id))
+            db.commit()
+            db.refresh(created)
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to apply client snapshot: {e}")
 
     _stamp_order_user_ids(created, session_user, created=True)
     actor = _actor_from_session_or_initials(session_user, initials)
@@ -1045,8 +1292,6 @@ def update_order(
 
     before = _order_snapshot(order)
 
-    was_finalized = ((order.status or 'draft').strip().lower() == 'finalized')
-
     # Track which fields were updated (for audit).
     touched_fields: list[str] = []
 
@@ -1125,92 +1370,58 @@ def update_order(
         except Exception:
             pass
 
-    # finalized orders are read-only unless override=true,
-    # EXCEPT: Rep can be changed on a finalized order by ADMIN (without unfinalizing).
-    incoming_rep_code = (getattr(payload, "rep_code", None) or "").strip() or None
-    incoming_rep_name = (getattr(payload, "rep_name", None) or "").strip() or None
+    # Rep reassignment.
+    incoming_rep_code = (payload.rep_code or "").strip().upper()
+    incoming_rep_name = (payload.rep_name or "").strip()
+
+    rep_change_requested = bool(incoming_rep_code or incoming_rep_name)
+
+    if rep_change_requested and not incoming_rep_code and incoming_rep_name:
+        # Try infer rep_code from "RC - Name" style.
+        if " - " in incoming_rep_name:
+            incoming_rep_code = incoming_rep_name.split(" - ", 1)[0].strip().upper()
+
+    # Determine whether any non-rep edits are requested (used for finalized gating).
+    core_fields = ["notes", "client_name", "client_company_name"]
+    other_edit_requested = False
+    for f in core_fields:
+        if getattr(payload, f, None) is not None:
+            other_edit_requested = True
+            break
+    if getattr(payload, "asset_type", None) is not None and (payload.asset_type or "").strip():
+        if (payload.asset_type or "").strip().lower() != (order.asset_type or "").strip().lower():
+            other_edit_requested = True
+
+    is_finalized = (order.status or "draft") == "finalized"
     is_admin = ((session_user or {}).get("role") == "admin")
 
-    # Detect whether the request is trying to change any non-rep fields.
-    # (We use the BEFORE snapshot for asset_type because the asset_type block above may have already applied changes.)
-    nonrep_asset_change = False
-    try:
-        if getattr(payload, "asset_type", None) is not None:
-            old_asset = (before.get("asset_type") or "").strip().lower()
-            new_asset = (str(getattr(payload, "asset_type") or "")).strip().lower()
-            nonrep_asset_change = (new_asset != old_asset)
-    except Exception:
-        nonrep_asset_change = False
-
-    nonrep_other_change = False
-    for _f in [
-        "artist",
-        "notes",
-        "client_name",
-        "client_company_name",
-        "order_type",
-        "description",
-        "length",
-        "instructions",
-        "is_revision",
-        "parent_order_id",
-        "revision_of",
-    ]:
-        try:
-            if getattr(payload, _f, None) is not None:
-                nonrep_other_change = True
-                break
-        except Exception:
-            pass
-
-    wants_rep_change = bool(incoming_rep_code or incoming_rep_name)
-    wants_nonrep_change = bool(nonrep_asset_change or nonrep_other_change)
-
-    if was_finalized and (not override):
-        # Finalized orders:
-        # - If you're changing anything besides rep, you need override=true.
-        # - If you're changing rep, only admin can do it (and we do NOT unfinalize).
-        if wants_nonrep_change:
+    # Finalized orders are read-only unless override=true, except admin can change rep only.
+    if is_finalized and not override:
+        if rep_change_requested and not other_edit_requested:
+            if not is_admin:
+                raise HTTPException(status_code=400, detail="order is finalized; only admin can change rep")
+        else:
             raise HTTPException(status_code=400, detail="order is finalized; use override=true to edit")
-        if wants_rep_change and (not is_admin):
-            raise HTTPException(status_code=403, detail="Admin required to change rep on a finalized order")
-        # else: no-op OR admin-only rep change is allowed
 
-    elif was_finalized and override and wants_rep_change and (not is_admin):
-        # Prevent rep changes via override shenanigans.
-        raise HTTPException(status_code=403, detail="Admin required to change rep on a finalized order")
-
-    # Rep reassignment:
-    # - Allowed for ANY user when the order is NOT finalized
-    # - Allowed for ADMIN when the order IS finalized
-    if wants_rep_change:
-        # Infer code from a "RM - Ron Mewis" style rep_name if needed.
-        if (not incoming_rep_code) and incoming_rep_name:
-            m = re.match(r"^\s*([A-Za-z0-9]{1,6})\s*[-–—]\s*.+$", incoming_rep_name)
-            if m:
-                incoming_rep_code = m.group(1).strip().upper()
-
-        if incoming_rep_code:
-            incoming_rep_code = incoming_rep_code.strip().upper()
-
+    # Apply rep change (if any).
+    if rep_change_requested:
         if not incoming_rep_code:
             raise HTTPException(status_code=400, detail="rep_code is required to change rep")
 
         rep_user = (
             db.query(User)
             .filter(func.upper(User.rep_code) == incoming_rep_code.upper())
-            .filter(or_(User.is_active.is_(True), User.is_active.is_(None)))
             .first()
         )
-        if not rep_user:
-            raise HTTPException(status_code=400, detail=f"Unknown rep_code: {incoming_rep_code!r}")
+        resolved_rep_name = rep_user.rep_name if rep_user else incoming_rep_name
 
-        order.rep_code = (getattr(rep_user, "rep_code", None) or incoming_rep_code).strip().upper()
-        order.rep_name = (getattr(rep_user, "rep_name", None) or order.rep_code).strip()
+        order.rep_code = incoming_rep_code.upper()
+        order.rep_name = (resolved_rep_name or "").strip()
+
         touched_fields.append("rep_code")
         touched_fields.append("rep_name")
 
-    # Apply allowed field updates (only if provided) (only if provided)
+# Apply allowed field updates (only if provided)
     for field in [
         "artist",
         "notes",
@@ -1228,6 +1439,19 @@ def update_order(
         if val is not None:
             setattr(order, field, val)
             touched_fields.append(field)
+
+    # Client reassignment (optional): apply AFTER field updates so we can heal a poisoned client
+    # using any company_name the user typed/filled on the order.
+    if getattr(payload, "client_id", None) is not None:
+        try:
+            _apply_client_snapshot(db, order, int(payload.client_id))
+            touched_fields.append("client_id")
+            touched_fields.append("client_name")
+            touched_fields.append("client_company_name")
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to apply client snapshot: {e}")
 
     # If your OrderUpdate schema ever includes status, still block it here.
     if hasattr(payload, "status") and getattr(payload, "status") is not None:
@@ -1254,8 +1478,6 @@ def update_order(
             "changes": _diff_dict(before, after, [
                 "artist",
                 "asset_type",
-                "rep_code",
-                "rep_name",
                 "notes",
                 "client_name",
                 "client_company_name",
