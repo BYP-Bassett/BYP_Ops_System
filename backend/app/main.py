@@ -20,6 +20,7 @@ from app.routes.orders import router as orders_router
 from app.database.engine import SessionLocal
 from app.models.users import User
 from app.models.orders import Order
+from app.models.clients import Client
 
 
 app = FastAPI()
@@ -105,6 +106,7 @@ async def _auth_session_guard(request: Request, call_next):
     if (
         path.startswith("/login")
         or path.startswith("/web")
+        or path.startswith("/static")
         or path in ("/health", "/favicon.ico")
     ):
         return await call_next(request)
@@ -301,6 +303,16 @@ def _user_field(u: User, name: str, default: str = "") -> str:
         return default
 
 
+def _client_field(c: Client, name: str, default: str = "") -> str:
+    try:
+        val = getattr(c, name)
+        if val is None:
+            return default
+        return str(val)
+    except Exception:
+        return default
+
+
 def _html_escape(s: str) -> str:
     return (
         (s or "")
@@ -406,6 +418,8 @@ def admin_users_page(request: Request, msg: str | None = None, err: str | None =
   <div class="bar">
     <a href="/">← Back to Search</a>
     <a class="btnlink" href="/admin/deleted-orders">Deleted Orders</a>
+    <a class="btnlink" href="/admin/clients">Client/Company List</a>
+
     <form method="post" action="/logout" style="margin:0;">
       <button type="submit">Logout</button>
     </form>
@@ -623,6 +637,573 @@ def admin_users_set_password(request: Request, user_id: int, password: str = For
 
 
 
+
+
+# ---- Admin: Client / Company List ----
+
+@app.get("/admin/clients.json", include_in_schema=False)
+def admin_clients_json(request: Request, q: str | None = None, limit: int = 500):
+    gate = _require_admin_or_redirect(request)
+    if gate is not None:
+        # fetch() callers need JSON, not HTML redirects.
+        try:
+            from starlette.responses import RedirectResponse as _RR
+            if isinstance(gate, _RR):
+                return JSONResponse(content={"detail": "Not authenticated"}, status_code=401)
+        except Exception:
+            pass
+        return gate
+
+    from sqlalchemy import or_
+
+    q_txt = (q or "").strip()
+    db = SessionLocal()
+    try:
+        query = db.query(Client)
+        if q_txt:
+            like = f"%{q_txt}%"
+            try:
+                query = query.filter(or_(Client.client_name.ilike(like), Client.company_name.ilike(like)))
+            except Exception:
+                query = query.filter(Client.client_name.ilike(like))
+
+        query = query.order_by(Client.client_name.asc())
+        clients = query.limit(int(limit)).all()
+
+        items = []
+        for c in clients:
+            items.append({
+                "id": int(getattr(c, "id")),
+                "client_name": str(getattr(c, "client_name") or ""),
+                "company_name": (getattr(c, "company_name", None) if getattr(c, "company_name", None) is not None else ""),
+            })
+
+        try:
+            count_q = db.query(Client)
+            if q_txt:
+                like = f"%{q_txt}%"
+                try:
+                    count_q = count_q.filter(or_(Client.client_name.ilike(like), Client.company_name.ilike(like)))
+                except Exception:
+                    count_q = count_q.filter(Client.client_name.ilike(like))
+            count = int(count_q.count())
+        except Exception:
+            count = int(len(items))
+
+        return JSONResponse(content={"value": items, "Count": count})
+    finally:
+        db.close()
+
+
+@app.get("/admin/clients", include_in_schema=False)
+def admin_clients_page(request: Request, msg: str | None = None, err: str | None = None):
+    gate = _require_admin_or_redirect(request)
+    if gate is not None:
+        return gate
+
+    username = (request.session.get("username") or "admin")
+
+    # Bootstrap initial data server-side so the page never appears blank.
+    db = SessionLocal()
+    try:
+        try:
+            clients = db.query(Client).order_by(Client.client_name.asc()).limit(500).all()
+            boot_items = [{
+                "id": int(getattr(c, "id")),
+                "client_name": str(getattr(c, "client_name") or ""),
+                "company_name": (getattr(c, "company_name", None) if getattr(c, "company_name", None) is not None else ""),
+            } for c in clients]
+            boot_count = int(db.query(Client).count())
+        except Exception:
+            boot_items = []
+            boot_count = 0
+    finally:
+        db.close()
+
+    clients_bootstrap_json = json.dumps({"value": boot_items, "Count": boot_count}).replace("</", "<\\/")
+
+    msg_html = ""
+    err_html = ""
+    if msg:
+        msg_html = f"<div class='ok'>{_html_escape(msg)}</div>"
+    if err:
+        err_html = f"<div class='err'>{_html_escape(err)}</div>"
+
+    html_tmpl = r"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>BYP Ops — Admin Clients</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 16px; font-size: 14px; font-weight: normal; }
+    .topbar { display:flex; gap:10px; align-items:center; margin-bottom:12px; flex-wrap:wrap; }
+    .btnlink { display:inline-block; padding:6px 10px; border:1px solid #999; border-radius:6px; text-decoration:none; color:#000; background:#f3f3f3; }
+    .btnlink:hover { background:#e9e9e9; }
+    .ok { background:#eaffea; border:1px solid #7ad67a; padding:8px 10px; border-radius:8px; margin:10px 0; }
+    .err { background:#ffecec; border:1px solid #d67a7a; padding:8px 10px; border-radius:8px; margin:10px 0; }
+    .muted { color:#666; font-size:12px; }
+    .grid { display:grid; grid-template-columns: 1fr 360px; gap:14px; align-items:start; }
+    .list { border:1px solid #ddd; border-radius:12px; overflow:hidden; }
+    .listHeader { display:flex; gap:10px; align-items:center; padding:10px; border-bottom:1px solid #eee; background:#fafafa; }
+    .listHeader input { flex: 1; padding:8px; border:1px solid #ccc; border-radius:8px; }
+    .listHeader button { padding:8px 10px; border:1px solid #999; border-radius:8px; background:#f3f3f3; cursor:pointer; }
+    .rows { max-height: 70vh; overflow:auto; }
+    .row { display:grid; grid-template-columns: 70px 1fr 1fr; gap:10px; padding:6px 10px; border-bottom:1px solid #f0f0f0; cursor:pointer; font-size: 13px; line-height: 1.2; align-items: center; }
+    .row:hover { background:#f7f7f7; }
+    .row.sel { background:#dbeafe; }
+    .cid { color:#666; font-size:12px; }
+    .cname { font-weight: normal; }
+    .comp { color:#333; }
+    .panel { border:1px solid #ddd; border-radius:12px; padding:12px; }
+    .panel h2 { margin:0 0 10px 0; font-size:16px; }
+    .field { margin-bottom:10px; }
+    .field label { display:block; font-size:12px; color:#666; margin-bottom:4px; }
+    .field input { width:100%; padding:8px; border:1px solid #ccc; border-radius:8px; }
+    .pill { display:inline-block; padding:2px 8px; border:1px solid #ccc; border-radius:999px; background:#f6f6f6; font-size:12px; }
+    .danger { background:#fee2e2 !important; border-color:#ef4444 !important; }
+    .ctx { position:fixed; display:none; z-index:9999; background:#fff; border:1px solid #ccc; border-radius:10px; overflow:hidden; box-shadow:0 10px 28px rgba(0,0,0,0.15); }
+    .ctx button { width:100%; border:0; background:#fff; padding:10px 12px; text-align:left; cursor:pointer; }
+    .ctx button:hover { background:#f5f5f5; }
+  
+/* Tighten client list row height */
+#clientsTable th, #clientsTable td {
+  padding-top: 2px !important;
+  padding-bottom: 2px !important;
+  line-height: 1.05 !important;
+}
+#clientsTable input[type="text"] {
+  padding-top: 2px !important;
+  padding-bottom: 2px !important;
+  line-height: 1.05 !important;
+}
+</style>
+</head>
+<body>
+  <div class="topbar">
+    <a class="btnlink" href="/admin/users">Users</a>
+    <a class="btnlink" href="/admin/deleted-orders">Deleted Orders</a>
+    <a class="btnlink" href="/admin/clients">Client/Company List</a>
+    <span class="muted">Signed in as <b>__USERNAME__</b></span>
+  </div>
+
+  __MSG_BLOCK__
+  __ERR_BLOCK__
+
+  <div class="grid">
+    <div class="list">
+      <div class="listHeader">
+        <input id="q" type="text" placeholder="Filter (name or company)..." />
+        <button id="refreshBtn" type="button">Refresh</button>
+        <span class="muted" id="countLbl"></span>
+      </div>
+      <div class="rows" id="rows"></div>
+    </div>
+
+    <div class="panel">
+      <h2>Edit</h2>
+      <div class="field">
+        <label>ID</label>
+        <div><span class="pill" id="editId">—</span></div>
+      </div>
+      <div class="field">
+        <label>Client Name</label>
+        <input id="editClient" type="text" />
+      </div>
+      <div class="field">
+        <label>Company Name</label>
+        <input id="editCompany" type="text" />
+      </div>
+      <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+        <button id="saveBtn" type="button" disabled>Save</button>
+        <button id="clearBtn" type="button">Clear</button>
+        <span class="muted" id="editMsg"></span>
+      </div>
+      <div style="margin-top:14px;" class="muted">
+        Tips: Click to select • Ctrl+Click multi-select • Shift+Click range • Right-click for menu
+      </div>
+    </div>
+  </div>
+
+  <div class="ctx" id="ctxMenu">
+    <button id="ctxDelete" class="danger" type="button">Delete selected…</button>
+  </div>
+
+<script>
+window.__CLIENTS_BOOTSTRAP__ = __CLIENTS_BOOTSTRAP_JSON__;
+(function(){
+  var rowsEl = document.getElementById("rows");
+  var qEl = document.getElementById("q");
+  var refreshBtn = document.getElementById("refreshBtn");
+  var countLbl = document.getElementById("countLbl");
+
+  var editIdEl = document.getElementById("editId");
+  var editClientEl = document.getElementById("editClient");
+  var editCompanyEl = document.getElementById("editCompany");
+  var saveBtn = document.getElementById("saveBtn");
+  var clearBtn = document.getElementById("clearBtn");
+  var editMsg = document.getElementById("editMsg");
+
+  var ctx = document.getElementById("ctxMenu");
+  var ctxDelete = document.getElementById("ctxDelete");
+
+  var items = [];
+  var selected = [];
+  var anchorIndex = null;
+  var focusedId = null;
+
+  function esc(s){
+    return String(s || "").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+  }
+  function setEdit(id){
+    focusedId = id;
+    editMsg.textContent = "";
+    if (!id){
+      editIdEl.textContent = "—";
+      editClientEl.value = "";
+      editCompanyEl.value = "";
+      saveBtn.disabled = true;
+      return;
+    }
+    var it = items.find(function(x){ return String(x.id) === String(id); });
+    if (!it){
+      editIdEl.textContent = "—";
+      editClientEl.value = "";
+      editCompanyEl.value = "";
+      saveBtn.disabled = true;
+      return;
+    }
+    editIdEl.textContent = String(it.id);
+    editClientEl.value = it.client_name || "";
+    editCompanyEl.value = it.company_name || "";
+    saveBtn.disabled = true;
+  }
+  function render(){
+    rowsEl.innerHTML = "";
+    for (var i=0;i<items.length;i++){
+      var it = items[i];
+      var div = document.createElement("div");
+      div.className = "row";
+      div.dataset.id = String(it.id);
+      div.dataset.index = String(i);
+
+      if (selected.indexOf(String(it.id)) >= 0){
+        div.className += " sel";
+      }
+
+      var cid = document.createElement("div");
+      cid.className = "cid";
+      cid.textContent = String(it.id);
+
+      var cn = document.createElement("div");
+      cn.className = "cname";
+      cn.textContent = (it.client_name || "");
+
+      var comp = document.createElement("div");
+      comp.className = "comp";
+      comp.textContent = it.company_name || "";
+
+      div.appendChild(cid);
+      div.appendChild(cn);
+      div.appendChild(comp);
+
+      div.addEventListener("click", function(ev){
+        var id = this.dataset.id;
+        var idx = parseInt(this.dataset.index, 10);
+
+        if (ev.shiftKey && anchorIndex !== null){
+          var a = anchorIndex;
+          var b = idx;
+          if (a > b){ var t=a; a=b; b=t; }
+          var next = [];
+          for (var k=a;k<=b;k++){
+            next.push(String(items[k].id));
+          }
+          selected = next;
+        } else if (ev.ctrlKey || ev.metaKey){
+          var p = selected.indexOf(String(id));
+          if (p >= 0) selected.splice(p,1);
+          else selected.push(String(id));
+          anchorIndex = idx;
+        } else {
+          selected = [String(id)];
+          anchorIndex = idx;
+        }
+
+        setEdit(id);
+        render();
+      });
+
+      div.addEventListener("contextmenu", function(ev){
+        ev.preventDefault();
+        var id = this.dataset.id;
+        var idx = parseInt(this.dataset.index, 10);
+
+        if (selected.indexOf(String(id)) < 0){
+          selected = [String(id)];
+          anchorIndex = idx;
+          setEdit(id);
+          render();
+        }
+        showCtx(ev.clientX, ev.clientY);
+      });
+
+      rowsEl.appendChild(div);
+    }
+
+    countLbl.textContent = items.length ? (items.length + " clients") : "0 clients";
+    ctxDelete.disabled = selected.length === 0;
+  }
+
+  function hideCtx(){ ctx.style.display = "none"; }
+  function showCtx(x,y){
+    ctx.style.display = "block";
+    ctx.style.left = x + "px";
+    ctx.style.top = y + "px";
+  }
+
+  document.addEventListener("click", function(){ hideCtx(); });
+  window.addEventListener("scroll", function(){ hideCtx(); }, true);
+  window.addEventListener("resize", function(){ hideCtx(); });
+
+  function load(){
+    hideCtx();
+    rowsEl.innerHTML = "<div class='row'><span class='muted'>Loading…</span></div>";
+    var q = qEl.value || "";
+    var url = "/admin/clients.json";
+    if (q){ url += "?q=" + encodeURIComponent(q); }
+    fetch(url, { credentials: "same-origin" })
+      .then(function(res){ return res.text().then(function(t){ return {ok:res.ok, status:res.status, text:t}; }); })
+      .then(function(r){
+        if (!r.ok){
+          rowsEl.innerHTML = "<div class='row'><b>HTTP " + r.status + "</b><div style='margin-left:10px;white-space:pre-wrap;'>" + esc(r.text) + "</div></div>";
+          return;
+        }
+        var data = null;
+        try { data = JSON.parse(r.text); } catch(e) {}
+        var arr = null;
+        if (Array.isArray(data)) arr = data;
+        else if (data && Array.isArray(data.value)) arr = data.value;
+
+        if (!arr){
+          var t = (r.text || "");
+          var looksHtml = (t.indexOf("<!doctype") >= 0) || (t.indexOf("<html") >= 0);
+          if (looksHtml){
+            rowsEl.innerHTML = "<div class='row'><b>Session expired.</b> Reloading…</div>";
+            window.location.reload();
+            return;
+          }
+          rowsEl.innerHTML = "<div class='row'><b>Bad JSON</b><div style='margin-left:10px;white-space:pre-wrap;max-height:140px;overflow:auto;'>" + esc(t.slice(0, 2000)) + "</div></div>";
+          return;
+        }
+        items = arr;
+
+        var existing = {};
+        for (var i=0;i<items.length;i++){ existing[String(items[i].id)] = true; }
+        selected = selected.filter(function(id){ return existing[String(id)]; });
+
+        if (focusedId && !existing[String(focusedId)]) focusedId = null;
+        if (focusedId) setEdit(focusedId);
+        else if (selected.length === 1) setEdit(selected[0]);
+        else setEdit(null);
+
+        render();
+      })
+      .catch(function(err){
+        rowsEl.innerHTML = "<div class='row'>Load failed: " + esc(String(err)) + "</div>";
+      });
+  }
+
+  refreshBtn.addEventListener("click", load);
+  qEl.addEventListener("keydown", function(ev){
+    if (ev.key === "Enter"){ load(); }
+  });
+
+  function setSaveEnabled(){
+    if (!focusedId){ saveBtn.disabled = true; return; }
+    var it = items.find(function(x){ return String(x.id) === String(focusedId); });
+    if (!it){ saveBtn.disabled = true; return; }
+    var changed = (String(editClientEl.value||"") !== String(it.client_name||"")) || (String(editCompanyEl.value||"") !== String(it.company_name||""));
+    saveBtn.disabled = !changed;
+  }
+  editClientEl.addEventListener("input", setSaveEnabled);
+  editCompanyEl.addEventListener("input", setSaveEnabled);
+
+  clearBtn.addEventListener("click", function(){
+    selected = [];
+    anchorIndex = null;
+    setEdit(null);
+    render();
+  });
+
+  saveBtn.addEventListener("click", function(){
+    if (!focusedId) return;
+
+    var form = new FormData();
+    form.append("client_name", editClientEl.value || "");
+    form.append("company_name", editCompanyEl.value || "");
+
+    saveBtn.disabled = true;
+    editMsg.textContent = "Saving…";
+
+    fetch("/admin/clients/" + encodeURIComponent(String(focusedId)) + "/update", {
+      method: "POST",
+      body: form,
+      credentials: "same-origin"
+    })
+    .then(function(res){ return res.text().then(function(t){ return {ok:res.ok, status:res.status, text:t}; }); })
+    .then(function(r){
+      if (!r.ok){
+        editMsg.textContent = "HTTP " + r.status;
+        alert("Save failed (HTTP " + r.status + "):\n\n" + r.text);
+        return;
+      }
+      editMsg.textContent = "Saved.";
+      load();
+    })
+    .catch(function(err){
+      editMsg.textContent = "Save failed.";
+      alert("Save failed:\n\n" + String(err));
+    });
+  });
+
+  ctxDelete.addEventListener("click", function(){
+    hideCtx();
+    if (!selected.length) return;
+
+    var n = selected.length;
+    if (!confirm("Delete " + n + " selected client(s)?\n\nFinalized orders will block deletion (we'll skip those).")) return;
+
+    fetch("/admin/clients/delete", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ids: selected }),
+      credentials: "same-origin"
+    })
+    .then(function(res){ return res.text().then(function(t){ return {ok:res.ok, status:res.status, text:t}; }); })
+    .then(function(r){
+      if (!r.ok){
+        alert("Delete failed (HTTP " + r.status + "):\n\n" + r.text);
+        return;
+      }
+      var data = null;
+      try { data = JSON.parse(r.text); } catch(e) {}
+      if (!data){
+        alert("Delete response was not JSON:\n\n" + r.text);
+        load();
+        return;
+      }
+      var msg = "";
+      if (data.deleted && data.deleted.length){
+        msg += "Deleted: " + data.deleted.join(", ") + "\n";
+      }
+      if (data.blocked && data.blocked.length){
+        msg += "\nSkipped (finalized orders): " + data.blocked.map(function(x){ return x.id; }).join(", ") + "\n";
+      }
+      if (data.not_found && data.not_found.length){
+        msg += "\nNot found: " + data.not_found.join(", ") + "\n";
+      }
+      alert(msg || "Done.");
+      selected = [];
+      anchorIndex = null;
+      focusedId = null;
+      load();
+    })
+    .catch(function(err){
+      alert("Delete failed:\n\n" + String(err));
+    });
+  });
+
+  // Boot immediately, then auto-load from JSON.
+  try {
+    var boot = window.__CLIENTS_BOOTSTRAP__;
+    if (boot && boot.value && Array.isArray(boot.value)) {
+      items = boot.value;
+      selected = [];
+      anchorIndex = null;
+      focusedId = null;
+      render();
+    }
+  } catch(e) {}
+
+  try { setTimeout(load, 0); } catch(e) {}
+})();
+</script>
+</body>
+</html>"""
+
+    html = (
+        html_tmpl.replace("__USERNAME__", username)
+                 .replace("__MSG_BLOCK__", msg_html)
+                 .replace("__ERR_BLOCK__", err_html)
+                 .replace("__CLIENTS_BOOTSTRAP_JSON__", clients_bootstrap_json)
+    )
+    return HTMLResponse(content=html)
+
+@app.post("/admin/clients/{client_id}/update", include_in_schema=False)
+def admin_clients_update(
+    request: Request,
+    client_id: int,
+    client_name: str = Form(...),
+    company_name: str = Form(""),
+    is_active: str | None = Form(None),
+):
+    gate = _require_admin_or_redirect(request)
+    if gate is not None:
+        return gate
+
+    cn = (client_name or "").strip()
+    co = (company_name or "").strip()
+    active = bool(is_active is not None)
+
+    if not cn:
+        return RedirectResponse(url="/admin/clients?err=" + urllib.parse.quote("Client name cannot be blank."), status_code=303)
+
+    db = SessionLocal()
+    try:
+        c = db.query(Client).filter(Client.id == client_id).first()
+        if not c:
+            return RedirectResponse(url="/admin/clients?err=" + urllib.parse.quote("Client not found."), status_code=303)
+
+        c.client_name = cn
+        c.company_name = (co or None)
+        c.is_active = active
+
+        db.add(c)
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        return RedirectResponse(url="/admin/clients?err=" + urllib.parse.quote(f"Update failed: {e}"), status_code=303)
+    finally:
+        db.close()
+
+    return RedirectResponse(url="/admin/clients?msg=" + urllib.parse.quote("Saved."), status_code=303)
+
+
+@app.post("/admin/clients/{client_id}/toggle", include_in_schema=False)
+def admin_clients_toggle(request: Request, client_id: int):
+    gate = _require_admin_or_redirect(request)
+    if gate is not None:
+        return gate
+
+    db = SessionLocal()
+    try:
+        c = db.query(Client).filter(Client.id == client_id).first()
+        if not c:
+            return RedirectResponse(url="/admin/clients?err=" + urllib.parse.quote("Client not found."), status_code=303)
+
+        c.is_active = not bool(getattr(c, "is_active", True))
+        db.add(c)
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        return RedirectResponse(url="/admin/clients?err=" + urllib.parse.quote(f"Toggle failed: {e}"), status_code=303)
+    finally:
+        db.close()
+
+    return RedirectResponse(url="/admin/clients?msg=" + urllib.parse.quote("Updated."), status_code=303)
+
+
 # ---- Admin: Deleted Orders (web) ----
 @app.get("/admin/deleted-orders", include_in_schema=False)
 def admin_deleted_orders_page(request: Request, msg: str | None = None, err: str | None = None):
@@ -770,58 +1351,67 @@ def admin_deleted_orders_page(request: Request, msg: str | None = None, err: str
     return HTMLResponse(content=html)
 
 
-# ---- Users JSON (for Rep picker, etc.) ----
-@app.get("/users.json", include_in_schema=False)
-def users_json(request: Request):
-    # Auth required.
-    if not _is_logged_in(request):
-        return JSONResponse(status_code=401, content={"detail": "Not authenticated"})
+@app.post("/admin/clients/delete", include_in_schema=False)
+async def admin_clients_delete(request: Request):
+    gate = _require_admin_or_redirect(request)
+    if gate is not None:
+        return gate
+
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+
+    ids = data.get("ids") or []
+    # normalize ids to ints where possible
+    norm_ids: list[int] = []
+    for x in ids:
+        try:
+            norm_ids.append(int(str(x)))
+        except Exception:
+            continue
+
+    deleted: list[int] = []
+    not_found: list[int] = []
+    blocked: list[dict] = []
 
     db = SessionLocal()
     try:
-        users = (
-            db.query(User)
-            .filter((User.is_active.is_(True)) | (User.is_active.is_(None)))
-            .order_by(User.rep_code.asc())
-            .all()
-        )
-        out = []
-        for u in users:
-            out.append({
-                "rep_code": str(getattr(u, "rep_code", "") or "").strip(),
-                "rep_name": str(getattr(u, "rep_name", "") or "").strip(),
-                "username": str(getattr(u, "username", "") or "").strip(),
-            })
-        return JSONResponse(content={"users": out})
+        for cid in norm_ids:
+            c = db.query(Client).filter(Client.id == cid).first()
+            if not c:
+                not_found.append(cid)
+                continue
+
+            # Block deletion if any finalized orders reference this client_name
+            try:
+                cname = str(getattr(c, "client_name") or "")
+                if cname:
+                    q = db.query(Order).filter(
+                        Order.client_name == cname,
+                        Order.status == "finalized",
+                        Order.is_deleted == False,  # noqa: E712
+                    )
+                    if q.count() > 0:
+                        blocked.append({"id": cid, "client_name": cname})
+                        continue
+            except Exception:
+                # If we can't verify, be conservative and block
+                blocked.append({"id": cid, "client_name": str(getattr(c, "client_name") or "")})
+                continue
+
+            db.delete(c)
+            deleted.append(cid)
+
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        return JSONResponse({"error": str(e)}, status_code=500)
     finally:
         db.close()
 
+    return JSONResponse({"deleted": deleted, "blocked": blocked, "not_found": not_found})
 
-@app.get("/admin/users.json", include_in_schema=False)
-def admin_users_json(request: Request):
-    # Admin required.
-    if not _is_logged_in(request):
-        return JSONResponse(status_code=401, content={"detail": "Not authenticated"})
-    if not _is_admin(request):
-        return JSONResponse(status_code=403, content={"detail": "Admin required"})
-
-    db = SessionLocal()
-    try:
-        users = db.query(User).order_by(User.id.asc()).all()
-        out = []
-        for u in users:
-            out.append({
-                "id": int(getattr(u, "id", 0) or 0),
-                "username": str(getattr(u, "username", "") or ""),
-                "rep_code": str(getattr(u, "rep_code", "") or ""),
-                "rep_name": str(getattr(u, "rep_name", "") or ""),
-                "role": str(getattr(u, "role", "") or ""),
-                "is_active": bool(getattr(u, "is_active", True)),
-                "email": str(getattr(u, "email", "") or "") if hasattr(u, "email") else "",
-            })
-        return JSONResponse(content={"users": out})
-    finally:
-        db.close()
 
 
 @app.post("/admin/deleted-orders/{order_id}/restore", include_in_schema=False)
@@ -875,6 +1465,8 @@ WEB_DIR = APP_DIR / "web"
 # Serve static assets (JS/CSS) from /web/*
 # Example: /web/app.js
 app.mount("/web", StaticFiles(directory=WEB_DIR), name="web")
+# Back-compat: older web builds referenced /static/* for assets.
+app.mount("/static", StaticFiles(directory=WEB_DIR), name="static")
 
 
 @app.get("/", include_in_schema=False)
@@ -1045,7 +1637,6 @@ def web_order_detail(request: Request, order_id: int):
     <div class="card">
       <h2>Rep</h2>
       <table><tbody id="repRows"></tbody></table>
-      <div class="hint">Anyone can change Rep until finalized. After finalized, only admins can change.</div>
     </div>
   </div>
 
@@ -1075,17 +1666,7 @@ def web_order_detail(request: Request, order_id: int):
 
       var trelloCardId = "";
 
-      // Who am I
-      var meInfo = null;
-      var isAdminUser = false;
 
-      // Rep picker
-      var reps = null; // array of {id,username,rep_code,rep_name,role,is_active}
-      var repCodeToName = {};
-      var repSelect = null;
-      var repNameDisplay = null;
-
-      var isFinalNow = false;
 
       var deleteBtn = document.getElementById("deleteBtn");
 
@@ -1104,6 +1685,11 @@ var orderRows = document.getElementById("orderRows");
       var notesInput = null;
       var clientNameInput = null;
       var clientCompanyInput = null;
+      var currentClientId = null;
+      var clientSuggestBox = null;
+      var clientSuggestList = null;
+      var clientSuggestTimer = null;
+      var clientSelectedSnapshot = { name: null, company: null };
 
       // Track last-loaded values so we can enable Save only when dirty
       var baseline = {
@@ -1111,8 +1697,7 @@ var orderRows = document.getElementById("orderRows");
         notes: "",
         client_name: "",
         client_company_name: "",
-        rep_code: "",
-        rep_name: ""
+        client_id: null
       };
       // Autosave state
       var autoSaveTimer = null;
@@ -1257,14 +1842,8 @@ var orderRows = document.getElementById("orderRows");
         // Populate options
         for (var i = 0; i < options.length; i++) {
           var opt = document.createElement("option");
-          var v = options[i];
-          var label = options[i];
-          if (typeof options[i] === "object" && options[i] !== null) {
-            v = options[i].value;
-            label = options[i].label;
-          }
-          opt.value = v;
-          opt.textContent = label;
+          opt.value = options[i];
+          opt.textContent = options[i];
           sel.appendChild(opt);
         }
 
@@ -1371,8 +1950,7 @@ var orderRows = document.getElementById("orderRows");
           notes: normalize(notesInput ? notesInput.value : ""),
           client_name: normalize(clientNameInput ? clientNameInput.value : ""),
           client_company_name: normalize(clientCompanyInput ? clientCompanyInput.value : ""),
-          rep_code: normalize(repSelect ? repSelect.value : baseline.rep_code),
-          rep_name: normalize(repNameDisplay ? repNameDisplay.value : baseline.rep_name)
+          client_id: (currentClientId === null || typeof currentClientId === "undefined") ? null : currentClientId
         };
       }
 
@@ -1381,67 +1959,34 @@ var orderRows = document.getElementById("orderRows");
         if (notesInput) notesInput.value = baseline.notes;
         if (clientNameInput) clientNameInput.value = baseline.client_name;
         if (clientCompanyInput) clientCompanyInput.value = baseline.client_company_name;
-        if (repSelect) repSelect.value = baseline.rep_code;
-        if (repNameDisplay) repNameDisplay.value = baseline.rep_name;
-      }
-
-      function isDirtyCore(d) {
-        return (
-          d.asset_type !== baseline.asset_type ||
-          d.notes !== baseline.notes ||
-          d.client_name !== baseline.client_name ||
-          d.client_company_name !== baseline.client_company_name
-        );
-      }
-
-      function isDirtyRep(d) {
-        return (
-          d.rep_code !== baseline.rep_code ||
-          d.rep_name !== baseline.rep_name
-        );
       }
 
       function isDirty() {
         var d = getDraft();
-        return isDirtyCore(d) || isDirtyRep(d);
-      }
-
-      function canEditCore() {
-        return !!isDraftNow;
-      }
-
-      function canEditRep() {
-        return !!isAdminUser && !isFinalNow;
+        return (
+          d.asset_type !== baseline.asset_type ||
+          d.notes !== baseline.notes ||
+          d.client_name !== baseline.client_name ||
+          d.client_company_name !== baseline.client_company_name ||
+          (d.client_id || null) !== (baseline.client_id || null)
+        );
       }
 
       function refreshDirtyUI() {
-        var d = getDraft();
-        var dirtyCore = isDirtyCore(d);
-        var dirtyRep = isDirtyRep(d);
-        var dirtyAny = dirtyCore || dirtyRep;
-
-        var canCore = canEditCore();
-        var canRep = canEditRep();
-
-        // Save rules:
-        // - Draft orders: Save enabled (even if nothing changed yet).
-        // - Non-draft: only enable Save if admin is changing rep and the order is not finalized.
-        if (canCore) {
+        var dirty = isDirty();
+        if (isDraftNow) {
+          // Keep Save enabled for draft orders (even if nothing changed yet).
           saveBtn.disabled = false;
-        } else if (canRep) {
-          saveBtn.disabled = !dirtyRep;
         } else {
           saveBtn.disabled = true;
         }
-
-        resetBtn.disabled = !dirtyAny;
+        resetBtn.disabled = !dirty;
       }
 
       function scheduleAutoSave() {
         if (!hasLoadedOnce) return;
-        if (!canEditCore()) return;
-        var d = getDraft();
-        if (!isDirtyCore(d)) return;
+        if (!isDraftNow) return;
+        if (!isDirty()) return;
         if (autoSaveTimer) clearTimeout(autoSaveTimer);
         autoSaveTimer = setTimeout(function() {
           saveAsync(true);
@@ -1454,21 +1999,11 @@ var orderRows = document.getElementById("orderRows");
           fn();
           return;
         }
-
-        var d = getDraft();
-        var dirtyCore = isDirtyCore(d);
-        var dirtyRep = isDirtyRep(d);
-
-        if (dirtyCore && !canEditCore()) {
+        // If user is editing a non-draft, don't silently spam the API.
+        if (!isDraftNow) {
           errEl.textContent = "This order isn't in DRAFT. Use Override Edit first.";
           return;
         }
-
-        if (dirtyRep && !canEditRep()) {
-          errEl.textContent = "Rep can only be changed by Admin, and only when NOT finalized.";
-          return;
-        }
-
         saveAsync(false).then(function(ok) {
           if (ok) fn();
         });
@@ -1493,81 +2028,80 @@ var orderRows = document.getElementById("orderRows");
       function saveAsync(quiet) {
         clearMsgs();
         if (isSaving) return Promise.resolve(false);
-
-        var d = getDraft();
-        var dirtyCore = isDirtyCore(d);
-        var dirtyRep = isDirtyRep(d);
-
-        if (dirtyCore && !canEditCore()) {
+        if (!isDraftNow) {
           if (!quiet) errEl.textContent = "This order isn't in DRAFT. Use Override Edit first.";
           return Promise.resolve(false);
-        }
-
-        if (dirtyRep && !canEditRep()) {
-          if (!quiet) errEl.textContent = "Rep can only be changed by Admin, and only when NOT finalized.";
-          return Promise.resolve(false);
-        }
-
-        // Nothing to save (common for non-draft view)
-        if (!dirtyCore && !dirtyRep && !canEditCore()) {
-          return Promise.resolve(true);
         }
 
         isSaving = true;
         setBusy(quiet ? "Autosaving…" : "Saving…");
         saveBtn.disabled = true;
 
-        var payload = {};
+        var d = getDraft();
+        var payload = {
+          notes: d.notes,
+          client_name: d.client_name,
+          client_company_name: d.client_company_name
+        };
 
-        if (dirtyCore) {
-          payload.notes = d.notes;
-          payload.client_name = d.client_name;
-          payload.client_company_name = d.client_company_name;
-
-          // Only send asset_type when it actually changed (avoids 400s on finalized orders).
-          if (d.asset_type !== baseline.asset_type) {
-            payload.asset_type = d.asset_type;
-          }
+        // Only send client_id when we actually have one selected.
+        if (d.client_id !== null) {
+          payload.client_id = d.client_id;
         }
 
-        if (dirtyRep) {
-          payload.rep_code = d.rep_code;
-          payload.rep_name = d.rep_name;
+
+        // Only send asset_type when it actually changed (avoids 400s on finalized orders).
+        if (d.asset_type !== baseline.asset_type) {
+          payload.asset_type = d.asset_type;
         }
 
-        return fetch("/orders/__ORDER_ID__", {
-          method: "PATCH",
+        var p = Promise.resolve(null);
+        if ((d.client_id === null) && ((d.client_name || "").trim() !== "")) {
+          p = ensureClientExists(d.client_name, d.client_company_name);
+        }
+
+        return p.then(function(newId) {
+          if (newId) payload.client_id = newId;
+          return fetch("/orders/" + ORDER_ID, {
           credentials: "same-origin",
+          method: "PATCH",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload)
-        }).then(function(res) {
+        })
+        .then(function(res) {
           return res.text().then(function(text) {
-            var data = null;
-            try { data = JSON.parse(text); } catch (e) {}
             if (!res.ok) {
-              if (!quiet) errEl.textContent = (data && (data.detail || data.error)) ? (data.detail || data.error) : ("Save failed (" + res.status + ")");
+              setBusy("");
+              errEl.textContent = "HTTP " + res.status + "\\n" + text;
+              refreshDirtyUI();
               return false;
             }
+
             // Update baseline locally so closing/finalizing won't lose changes.
             baseline = {
               asset_type: d.asset_type,
               notes: d.notes,
               client_name: d.client_name,
               client_company_name: d.client_company_name,
-              rep_code: d.rep_code,
-              rep_name: d.rep_name
+              client_id: (d.client_id || null)
             };
-            okEl.textContent = quiet ? "" : "Saved.";
+
+            okEl.textContent = quiet ? "Autosaved." : "Saved.";
             refreshDirtyUI();
+            hasLoadedOnce = true;
+            setBusy("Loaded.");
             return true;
           });
-        }).catch(function(err) {
-          if (!quiet) errEl.textContent = "Save error: " + (err && err.message ? err.message : String(err));
-          return false;
-        }).finally(function() {
-          isSaving = false;
+        })
+        .catch(function(e) {
           setBusy("");
+          errEl.textContent = String(e);
           refreshDirtyUI();
+          return false;
+        })
+        .finally(function() {
+          isSaving = false;
+        });
         });
       }
 
@@ -1813,72 +2347,333 @@ function load() {
             clientRows.innerHTML = "";
             clientNameInput = addInputRow(clientRows, "Client Name", "editClientName", "text");
             clientCompanyInput = addInputRow(clientRows, "Client Company", "editClientCompany", "text");
+
+            // --- Client typeahead (fast) ---
+            function ensureClientSuggestUI() {
+              if (clientSuggestBox) return;
+              clientSuggestBox = document.createElement("div");
+              clientSuggestBox.style.position = "absolute";
+              clientSuggestBox.style.zIndex = "9999";
+              clientSuggestBox.style.background = "#fff";
+              clientSuggestBox.style.border = "1px solid #ccc";
+              clientSuggestBox.style.borderRadius = "10px";
+              clientSuggestBox.style.boxShadow = "0 4px 18px rgba(0,0,0,.12)";
+              clientSuggestBox.style.padding = "6px";
+              clientSuggestBox.style.display = "none";
+              clientSuggestBox.style.maxHeight = "220px";
+              clientSuggestBox.style.overflowY = "auto";
+              clientSuggestBox.style.minWidth = "260px";
+
+              clientSuggestList = document.createElement("div");
+              clientSuggestBox.appendChild(clientSuggestList);
+              document.body.appendChild(clientSuggestBox);
+            }
+
+            function positionClientSuggest() {
+              if (!clientSuggestBox || !clientNameInput) return;
+              var r = clientNameInput.getBoundingClientRect();
+              clientSuggestBox.style.left = (window.scrollX + r.left) + "px";
+              clientSuggestBox.style.top = (window.scrollY + r.bottom + 6) + "px";
+              clientSuggestBox.style.minWidth = Math.max(260, r.width) + "px";
+            }
+
+            function hideClientSuggest() {
+              if (!clientSuggestBox) return;
+              clientSuggestBox.style.display = "none";
+              if (clientSuggestList) clientSuggestList.innerHTML = "";
+            }
+
+            // Keyboard nav state for client suggest
+            var clientSuggestItems = [];
+            var clientSuggestIndex = -1;
+
+            function setClientSuggestActive(idx) {
+              if (!clientSuggestBox) return;
+              var kids = Array.prototype.slice.call(clientSuggestList.querySelectorAll(".byp-suggest-item"));
+              if (!kids.length) { clientSuggestIndex = -1; return; }
+
+              var n = idx;
+              if (n < 0) n = 0;
+              if (n >= kids.length) n = kids.length - 1;
+
+              kids.forEach(function(el, i) {
+                if (i === n) {
+                  el.style.background = "#93c5fd";
+                  el.style.border = "1px solid #1d4ed8";
+                } else {
+                  el.style.background = "transparent";
+                  el.style.border = "1px solid transparent";
+                }
+                el.setAttribute("aria-selected", (i === n) ? "true" : "false");
+              });
+
+              clientSuggestIndex = n;
+              try { kids[n].scrollIntoView({ block: "nearest" }); } catch (e) {}
+            }
+
+            function applyClientSuggestItem(it, items) {
+              if (!it) return;
+              var nm = (it.client_name || "").toString().trim();
+
+              var getCo = function(x){
+                try { return ((x.company_name || x.client_company_name || x.client_company || x.company) || "").toString(); }
+                catch (e) { return ""; }
+              };
+
+              var co = getCo(it);
+              if ((!co || !co.trim()) && nm && items && items.length) {
+                for (var bi = 0; bi < items.length; bi++) {
+                  var x = items[bi];
+                  if (((x.client_name || "").toString()) === nm) {
+                    var cand = getCo(x);
+                    if (cand && cand.trim()) { co = cand; break; }
+                  }
+                }
+              }
+              co = (co || "").toString().trim();
+
+              currentClientId = it.id;
+              clientSelectedSnapshot = { name: nm, company: co };
+
+              if (clientNameInput) clientNameInput.value = nm;
+              if (clientCompanyInput) clientCompanyInput.value = co;
+
+              hideClientSuggest();
+              refreshDirtyUI();
+
+              try { clientNameInput.focus(); clientNameInput.setSelectionRange(clientNameInput.value.length, clientNameInput.value.length); } catch (e) {}
+            }
+
+            function selectActiveClientSuggest() {
+              if (clientSuggestIndex < 0 || clientSuggestIndex >= clientSuggestItems.length) return false;
+              applyClientSuggestItem(clientSuggestItems[clientSuggestIndex], clientSuggestItems);
+              return true;
+            }
+
+            function onClientNameKeyDown(e) {
+              if (!clientSuggestBox || clientSuggestBox.style.display !== "block") return;
+              var k = e.key || "";
+              var code = e.keyCode || 0;
+
+              if (k === "ArrowDown" || code === 40) {
+                e.preventDefault();
+                if (clientSuggestIndex < 0) setClientSuggestActive(0);
+                else setClientSuggestActive(clientSuggestIndex + 1);
+              } else if (k === "ArrowUp" || code === 38) {
+                e.preventDefault();
+                if (clientSuggestIndex < 0) setClientSuggestActive(0);
+                else setClientSuggestActive(clientSuggestIndex - 1);
+              } else if (k === "Enter" || code === 13) {
+                if (clientSuggestIndex >= 0) {
+                  e.preventDefault();
+                  selectActiveClientSuggest();
+                }
+              } else if (k === "Escape" || code === 27) {
+                e.preventDefault();
+                hideClientSuggest();
+              }
+            }
+
+            
+      function ensureClientExists(clientName, companyName) {
+        var name = (clientName || "").trim();
+        var company = (companyName || "").trim();
+        if (!name) return Promise.resolve(null);
+
+        return fetch("/orders/clients", {
+          method: "POST",
+          credentials: "same-origin",
+          headers: { "Content-Type": "application/json", "Accept": "application/json" },
+          body: JSON.stringify({
+            client_name: name,
+            company_name: company || null,
+            is_active: true
+          })
+        }).then(function(res) {
+          if (!res.ok) return null;
+          return res.json();
+        }).then(function(data) {
+          if (data && data.id != null) return data.id;
+          return null;
+        }).catch(function(_e) { return null; });
+      }
+
+function fetchClientSuggest(q) {
+              return fetch("/orders/clients/suggest?q=" + encodeURIComponent(q) + "&limit=10", { credentials: "same-origin" })
+                .then(function(res) {
+                  if (!res.ok) { return []; }
+                  return res.json();
+                })
+                .then(function(data) {
+                  // API may return a raw array OR a wrapper object like { value: [...], Count: N } / { items: [...] }.
+                  if (Array.isArray(data)) return data;
+                  if (data && Array.isArray(data.value)) return data.value;
+                  if (data && Array.isArray(data.items)) return data.items;
+                  if (data && Array.isArray(data.results)) return data.results;
+                  return [];
+                })
+                .catch(function() { return []; });
+            }
+
+            function renderClientSuggest(items) {
+              ensureClientSuggestUI();
+              clientSuggestList.innerHTML = "";
+              clientSuggestItems = (items && items.slice) ? items.slice() : [];
+              clientSuggestIndex = -1;
+
+              if (!items || !items.length) {
+                hideClientSuggest();
+                return;
+              }
+
+              items.forEach(function(it, i) {
+                var row = document.createElement("div");
+                row.className = "byp-suggest-item";
+                row.setAttribute("role","option");
+                row.style.padding = "8px 10px";
+                row.style.borderRadius = "8px";
+                row.style.cursor = "pointer";
+                row.style.userSelect = "none";
+
+                var nm = (it.client_name || "").toString();
+                var getCo = function(x){
+                  try { return ((x.company_name || x.client_company_name || x.client_company || x.company) || "").toString(); } catch (e) { return ""; }
+                };
+                var co = getCo(it);
+                if ((!co || !co.trim()) && nm && items && items.length) {
+                  for (var bi = 0; bi < items.length; bi++) {
+                    var x = items[bi];
+                    if (((x.client_name || "").toString()) === nm) {
+                      var cand = getCo(x);
+                      if (cand && cand.trim()) { co = cand; break; }
+                    }
+                  }
+                }
+                co = (co || "").toString();
+                row.textContent = co ? (nm + " — " + co) : nm;
+
+                row.addEventListener("mouseenter", function(){ setClientSuggestActive(i); });
+                row.addEventListener("mouseleave", function(){ if (clientSuggestIndex >= 0) setClientSuggestActive(clientSuggestIndex); });
+
+                row.addEventListener("mousedown", function(ev) {
+                  ev.preventDefault(); // keep focus
+                  applyClientSuggestItem(it, items);
+                });
+
+                clientSuggestList.appendChild(row);
+              });
+
+              positionClientSuggest();
+              clientSuggestBox.style.display = "block";
+            }
+
+            function onClientNameTyping() {
+              if (!clientNameInput) return;
+
+              // If user edits away from the selected suggestion, clear client_id (and company if it was auto-filled)
+              var typed = normalize(clientNameInput.value || "");
+              if (clientSelectedSnapshot.name !== null && typed !== normalize(clientSelectedSnapshot.name)) {
+                currentClientId = null;
+                if (clientCompanyInput && normalize(clientCompanyInput.value || "") === normalize(clientSelectedSnapshot.company || "")) {
+                  clientCompanyInput.value = "";
+                }
+                clientSelectedSnapshot = { name: null, company: null };
+              }
+
+              if (clientSuggestTimer) clearTimeout(clientSuggestTimer);
+              var q = typed.trim();
+              if (q.length < 2) {
+                hideClientSuggest();
+                refreshDirtyUI();
+                return;
+              }
+
+              clientSuggestTimer = setTimeout(function() {
+                (function(expected) {
+                  fetchClientSuggest(expected).then(function(items) {
+                    renderClientSuggest(items);
+
+                    // If the typed client name EXACTLY matches a suggestion, auto-fill company name (best match)
+                    // without forcing a click/Enter.
+                    try {
+                      var currentTyped = normalize(clientNameInput ? clientNameInput.value : "").trim();
+                      if (normalize(currentTyped).trim() !== normalize(expected).trim()) return;
+
+                      // Do not overwrite a manually entered company.
+                      if (!clientCompanyInput) return;
+                      var companyNow = normalize(clientCompanyInput.value || "").trim();
+                      if (companyNow) return;
+
+                      var want = normalize(expected).trim().toLowerCase();
+                      var best = null;
+                      var bestCompany = "";
+
+                      var getCo = function(x){
+                        try { return ((x.company_name || x.client_company_name || x.client_company || x.company) || "").toString().trim(); }
+                        catch (e) { return ""; }
+                      };
+
+                      for (var ii = 0; ii < (items || []).length; ii++) {
+                        var it = items[ii];
+                        var nm = ((it && it.client_name) ? it.client_name : "").toString().trim();
+                        if (!nm) continue;
+                        if (nm.toLowerCase() !== want) continue;
+
+                        var co = getCo(it);
+                        // prefer any non-empty company; otherwise keep first match
+                        if (!best) best = it;
+                        if (co && co.trim()) { best = it; bestCompany = co; break; }
+                      }
+
+                      if (best) {
+                        bestCompany = bestCompany || getCo(best) || "";
+                        if (bestCompany) {
+                          clientCompanyInput.value = bestCompany;
+                          currentClientId = best.id;
+                          clientSelectedSnapshot = { name: normalize(best.client_name || "").trim(), company: bestCompany };
+                          refreshDirtyUI();
+                        }
+                      }
+                    } catch (e) {
+                      // ignore
+                    }
+                  });
+                })(q);
+              }, 250);
+
+              refreshDirtyUI();
+            }
+
+            // Best-effort: stop browser autofill from hijacking this field
+            try {
+              clientNameInput.setAttribute("autocomplete", "off");
+              clientCompanyInput.setAttribute("autocomplete", "off");
+            } catch (e) {}
+
+            ensureClientSuggestUI();
+            window.addEventListener("scroll", positionClientSuggest);
+            window.addEventListener("resize", positionClientSuggest);
+
+            clientNameInput.addEventListener("input", onClientNameTyping);
+            clientNameInput.addEventListener("keydown", onClientNameKeyDown);
+            clientNameInput.addEventListener("focus", function(){ onClientNameTyping(); });
+            clientNameInput.addEventListener("blur", function(){ setTimeout(hideClientSuggest, 150); });
+
             addRow(clientRows, "Client Email", data.client_email);
             addRow(clientRows, "Client Phone", data.client_phone);
 
             // ----- Rep section -----
-            repRows.innerHTML = "";
-            var currentRepCode = normalize(data.rep_code);
-            var currentRepName = normalize(data.rep_name);
-
-            // Determine finalized (rep changes blocked if finalized)
-            var isFinal = false;
-            if (data && data.finalized_at) {
-              isFinal = true;
-            } else if (data && data.status) {
-              var s2 = String(data.status).toLowerCase();
-              if (s2.indexOf("final") >= 0) isFinal = true;
-            }
-            isFinalNow = isFinal;
-
-            if (((!isFinalNow) || isAdminUser) && reps && Array.isArray(reps) && reps.length) {
-              // Build rep options
-              var opts = [];
-              for (var ri = 0; ri < reps.length; ri++) {
-                var u = reps[ri] || {};
-                var rc = normalize(u.rep_code).trim();
-                var rn = normalize(u.rep_name).trim();
-                var label = rc;
-                if (rn) label = rc + " - " + rn;
-                opts.push({ value: rc, label: label });
-              }
-
-              // Ensure current rep is selectable even if missing from list
-              if (currentRepCode && !repCodeToName[currentRepCode]) {
-                opts.unshift({ value: currentRepCode, label: currentRepCode + (currentRepName ? (" - " + currentRepName) : "") });
-                repCodeToName[currentRepCode] = currentRepName;
-              }
-
-              repSelect = addSelectRow(repRows, "Rep", "editRepCode", opts);
-              repNameDisplay = addInputRow(repRows, "Rep Name", "editRepName", "text");
-              repNameDisplay.disabled = true;
-
-              repSelect.value = currentRepCode || "";
-              repNameDisplay.value = currentRepName || "";
-
-              repSelect.addEventListener("change", function() {
-                var rc2 = normalize(repSelect.value).trim();
-                var rn2 = repCodeToName[rc2] || "";
-                if (repNameDisplay) repNameDisplay.value = rn2;
-                okEl.textContent = "";
-                refreshDirtyUI();
-              });
-            } else {
-              // Read-only view
-              repSelect = null;
-              repNameDisplay = null;
-              addRow(repRows, "Rep Code", currentRepCode);
-              addRow(repRows, "Rep Name", currentRepName);
-            }
+            renderSection(repRows, data, [
+              { label: "Rep Code", key: "rep_code" },
+              { label: "Rep Name", key: "rep_name" }
+            ]);
 
             // Baseline values
             baseline = {
               asset_type: normalize(data.asset_type).toLowerCase(),
               notes: normalize(data.notes),
               client_name: normalize(data.client_name),
-              client_company_name: normalize(data.client_company_name),
-              rep_code: currentRepCode,
-              rep_name: currentRepName
+              client_company_name: normalize(data.client_company_name)
             };
             setDraftFromBaseline();
 
@@ -1913,14 +2708,17 @@ function load() {
             if (clientNameInput) clientNameInput.disabled = !isDraft;
             if (clientCompanyInput) clientCompanyInput.disabled = !isDraft;
 
-            // Rep picker is admin-only and blocked if finalized
-            if (repSelect) {
-              repSelect.disabled = !(isAdminUser && !isFinalNow);
+            // Finalize/Unfinalize: best-effort based on finalized_at or status text
+            var isFinal = false;
+            if (data && data.finalized_at) {
+              isFinal = true;
+            } else if (data && data.status) {
+              var s = String(data.status).toLowerCase();
+              if (s.indexOf("final") >= 0) isFinal = true;
             }
 
-            // Finalize/Unfinalize
-            finalizeBtn.disabled = isFinalNow;
-            unfinalizeBtn.disabled = !isFinalNow;
+            finalizeBtn.disabled = isFinal;
+            unfinalizeBtn.disabled = !isFinal;
 
             refreshDirtyUI();
             setBusy("Loaded.");
@@ -1931,64 +2729,8 @@ function load() {
           });
       }
 
-      function fetchMe() {
-        return fetch("/me", { credentials: "same-origin" })
-          .then(function(res) {
-            return res.text().then(function(t) {
-              try { return JSON.parse(t); } catch (e) { return null; }
-            });
-          })
-          .then(function(info) {
-            meInfo = info;
-            isAdminUser = !!(info && info.authenticated && String(info.role || "").toLowerCase() === "admin");
-            return info;
-          })
-          .catch(function() { meInfo = null; isAdminUser = false; return null; });
-      }
-
-      function fetchReps() {
-        return fetch("/users.json", { credentials: "same-origin" })
-          .then(function(res) {
-            return res.text().then(function(text) {
-              if (!res.ok) return null;
-              try { return JSON.parse(text); } catch (e) { return null; }
-            });
-          })
-          .then(function(data) {
-            reps = (data && data.users) ? data.users : data;
-            if (!Array.isArray(reps)) reps = [];
-            repCodeToName = {};
-            var filtered = [];
-            for (var i = 0; i < reps.length; i++) {
-              var u = reps[i] || {};
-              if (u.is_active === false) continue;
-              var rc = normalize(u.rep_code).trim();
-              if (!rc) continue;
-              var rn = normalize(u.rep_name).trim();
-              repCodeToName[rc] = rn;
-              filtered.push(u);
-            }
-            reps = filtered;
-            reps.sort(function(a, b) {
-              var ar = normalize(a.rep_code).toUpperCase();
-              var br = normalize(b.rep_code).toUpperCase();
-              if (ar < br) return -1;
-              if (ar > br) return 1;
-              return 0;
-            });
-            return reps;
-          })
-          .catch(function() { reps = []; repCodeToName = {}; return null; });
-      }
-
-      function init() {
-        wireCopyWidget();
-        fetchMe()
-          .then(fetchReps)
-          .then(function() { load(); });
-      }
-
-      init();
+      wireCopyWidget();
+      load();
     })();
   </script>
 </body>

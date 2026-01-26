@@ -1,15 +1,16 @@
 {
   "column_widths": {
-    "Rep": 54,
-    "Status": 58,
-    "Asset": 55,
-    "SP": 75,
-    "Revision Of": 75,
-    "Add'l Vers Of": 97,
-    "Artist": 258,
-    "Notes": 399
+    "Rep": 57,
+    "Status": 49,
+    "Asset": 46,
+    "SP": 66,
+    "Revision Of": 66,
+    "Add'l Vers Of": 88,
+    "Artist": 238,
+    "Notes": 390,
+    "Order ID": 71
   },
-  "window_geometry": "1093x720+-1243+178",
+  "window_geometry": "1093x720+-1181+95",
   "window_state": "normal",
   "last_username": "sb"
 }

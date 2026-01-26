@@ -170,6 +170,19 @@ def finalize_order(
     asset = (getattr(order, "asset_type", "") or "").strip().lower()
 
     if asset in ("radio", "video"):
+
+        # Auto-assign SP if missing (defensive; also handled on asset_type flip).
+        # Without this, Art->Radio/Video flips can fail at finalize time.
+        if getattr(order, "sp_id", None) is None:
+            sp_rec = generate_next_sp(db, asset)
+            order.sp_id = sp_rec.id
+            try:
+                order.sp = sp_rec  # type: ignore[attr-defined]
+            except Exception:
+                pass
+            db.commit()
+            db.refresh(order)
+
         # Get SP number (relationship should lazy-load if needed)
         sp_number = None
         try:

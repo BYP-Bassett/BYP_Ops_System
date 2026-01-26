@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import datetime
 from pathlib import Path
 import os
 import threading
@@ -56,6 +57,34 @@ def _prefs_path() -> str:
     except Exception:
         base = os.getcwd()
     return os.path.join(base, "OrderSearchGUI_prefs.json")
+
+
+def _debug_log_path() -> str:
+    """Simple debug log file stored next to this script."""
+    try:
+        base = os.path.dirname(os.path.abspath(__file__))
+    except Exception:
+        base = os.getcwd()
+    return os.path.join(base, "OrderSearchGUI_debug.log")
+
+
+def _debug_log(line: str) -> None:
+    """Best-effort debug logging (never crash the GUI)."""
+    try:
+        ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        ts = ""
+    msg = f"[{ts}] {line}".strip()
+    try:
+        print(msg)
+    except Exception:
+        pass
+    try:
+        with open(_debug_log_path(), "a", encoding="utf-8") as f:
+            f.write(msg + "\n")
+    except Exception:
+        pass
+
 
 
 
@@ -320,6 +349,100 @@ def api_me(timeout: int = 10) -> dict:
     except Exception:
         return {}
 
+def api_admin_user_list(timeout: int = 15) -> dict:
+    """GET /admin/users.json"""
+    return http_get_json(f"{API_BASE}/admin/users.json", timeout=timeout)
+
+
+def api_clients_suggest(q: str, limit: int = 10, timeout: int = 10) -> list[dict]:
+    """GET /orders/clients/suggest?q=...&limit=...
+
+    Server may return either:
+      - a raw JSON list: [...]
+      - a wrapper object: { value: [...], Count: N } (or {items:[...]} / {results:[...]})
+    """
+    qq = (q or "").strip()
+    if not qq:
+        return []
+    url = f"{API_BASE}/orders/clients/suggest?" + urlencode({"q": qq, "limit": int(limit)})
+    data = http_get_json(url, timeout=timeout)
+
+    if isinstance(data, list):
+        return data
+
+    if isinstance(data, dict):
+        for k in ("value", "items", "results", "data"):
+            v = data.get(k)
+            if isinstance(v, list):
+                return v
+
+    return []
+
+
+def api_clients_create_best_effort(client_name: str, company_name: str | None = None, timeout: int = 12) -> int | None:
+    """POST /orders/clients (best-effort). Returns client_id or None.
+    Logs URL/payload and response status/body snippet to OrderSearchGUI_debug.log.
+    """
+    cn = (client_name or "").strip()
+    if not cn:
+        return None
+    cco = (company_name or "").strip() if company_name is not None else ""
+    url = f"{API_BASE}/orders/clients"
+    payload = {"client_name": cn}
+    if cco:
+        payload["company_name"] = cco
+
+    _debug_log(f"CLIENT_CREATE POST {url} payload={payload!r}")
+
+    headers = {"Accept": "application/json", "Content-Type": "application/json"}
+    data = json.dumps(payload).encode("utf-8")
+    req = Request(url, data=data, headers=headers, method="POST")
+
+    status = None
+    raw = ""
+    try:
+        with _OPENER.open(req, timeout=timeout) as resp:
+            status = getattr(resp, "status", 200)
+            raw = resp.read().decode("utf-8", errors="replace")
+            _save_cookies()
+    except HTTPError as e:
+        try:
+            status = getattr(e, "code", None)
+        except Exception:
+            status = None
+        try:
+            raw = e.read().decode("utf-8", errors="replace")
+        except Exception:
+            raw = str(e)
+        try:
+            _save_cookies()
+        except Exception:
+            pass
+        snippet = (raw or "").strip().replace("\n", " ")[:200]
+        _debug_log(f"CLIENT_CREATE RESP status={status} body={snippet!r}")
+        return None
+    except Exception as e:
+        _debug_log(f"CLIENT_CREATE EXC {type(e).__name__}: {e}")
+        return None
+
+    snippet = (raw or "").strip().replace("\n", " ")[:200]
+    _debug_log(f"CLIENT_CREATE RESP status={status} body={snippet!r}")
+
+    # Parse JSON (best-effort)
+    try:
+        parsed = json.loads(raw) if (raw or "").strip() else {}
+    except Exception:
+        parsed = {}
+
+    cid = None
+    if isinstance(parsed, dict):
+        cid = parsed.get("id") or parsed.get("client_id")
+    try:
+        return int(cid) if cid is not None else None
+    except Exception:
+        return None
+
+
 
 def api_login(username: str, password: str, timeout: int = 15) -> bool:
     # POST /login (form) and then verify via /me
@@ -351,76 +474,36 @@ def _me_is_admin(me: dict) -> bool:
 def api_admin_users_list(timeout: int = 12) -> list[dict]:
     """Admin-only list of users.
 
-    Backend variants we've seen:
-      - GET /admin/users?json=1 -> list
-      - GET /admin/users?json=1 -> {"items":[...]} or {"users":[...]} or {"data":[...]}
-      - GET /admin/users with Accept: application/json -> JSON (content-negotiated)
+    Prefer JSON endpoint:
+        GET /admin/users.json -> {"total": int, "items": [user, ...]}
 
-    This function is intentionally noisy: it raises on unexpected shapes instead of
-    silently returning [] (the '0 users' lie).
+    Fallback (older builds / desktop mismatch):
+        GET /admin/users (HTML) -> parse table
     """
-    urls = [
-        f"{API_BASE}/admin/users?json=1",
-        f"{API_BASE}/admin/users",
-    ]
+    try:
+        data = http_get_json(f"{API_BASE}/admin/users.json", timeout=timeout)
+    except HTTPError as e:
+        # If the JSON endpoint doesn't exist yet, fall back to the HTML page.
+        if getattr(e, "code", None) == 404:
+            html, _ct = http_get_text(f"{API_BASE}/admin/users", timeout=timeout)
+            items = _parse_admin_users_html(html)
+            if items:
+                return items
+            raise RuntimeError("Admin users endpoint not available (/admin/users.json or /admin/users).")
+        raise
 
-    last_err = None
-    for url in urls:
-        try:
-            data = http_get_json(url, timeout=timeout)
-        except RuntimeError as e:
-            # /admin/users is server-rendered (HTML) — parse the table as a fallback.
-            if 'Expected JSON but got text/html' in str(e):
-                try:
-                    html_text, _ct = http_get_text(url, timeout=timeout)
-                    users = _parse_admin_users_html(html_text)
-                    if users:
-                        return users
-                except Exception:
-                    pass
-            last_err = e
-            continue
-        except Exception as e:
-            last_err = e
-            continue
-            last_err = e
-            continue
-
-        # Shape A: direct list
-        if isinstance(data, list):
-            return data
-
-        # Shape B: dict wrapper
-        if isinstance(data, dict):
-            detail = data.get("detail")
-            if isinstance(detail, str) and detail.strip():
-                raise RuntimeError(detail.strip())
-
-            for k in ("items", "users", "data", "value", "results"):
-                v = data.get(k)
-                if isinstance(v, list):
-                    return v
-                if isinstance(v, dict):
-                    for k2 in ("items", "users", "value", "results", "data"):
-                        v2 = v.get(k2)
-                        if isinstance(v2, list):
-                            return v2
-
-            # If *any* dict value is a list-of-dicts, accept it
-            for v in data.values():
-                if isinstance(v, list) and (not v or isinstance(v[0], dict)):
-                    return v
-
-            raise RuntimeError(f"Unexpected JSON shape from {url}")
-
-        raise RuntimeError(f"Unexpected response type from {url}: {type(data).__name__}")
-
-    # If we got here, both URLs failed
-    if last_err is not None:
-        raise RuntimeError(f"Admin users request failed: {last_err}")
-    raise RuntimeError("Admin users request failed.")
-
-
+    if isinstance(data, dict):
+        items = data.get("items")
+        if isinstance(items, list):
+            return items
+        # tolerate alternate shapes
+        for k in ("users", "data", "results", "value"):
+            v = data.get(k)
+            if isinstance(v, list):
+                return v
+    if isinstance(data, list):
+        return data
+    raise RuntimeError("Unexpected JSON shape from /admin/users.json")
 class FinalizeDialog(tk.Toplevel):
     def __init__(self, parent, order_id: int):
         super().__init__(parent)
@@ -491,6 +574,265 @@ class FinalizeDialog(tk.Toplevel):
         messagebox.showerror("Finalize failed", msg)
 
 
+class _ClientTypeahead:
+    """Small dropdown suggest for a ttk.Entry (client name -> fill company + store client_id).
+
+    - Debounced fetch
+    - No 'auto-fill' unless user selects an item
+    """
+    def __init__(self, root: tk.Misc, name_entry: ttk.Entry, company_var: tk.StringVar, on_set_client_id, auth_caller=None):
+        self.root = root
+        self.name_entry = name_entry
+        self.company_var = company_var
+        self.on_set_client_id = on_set_client_id
+        self.auth_caller = auth_caller
+
+        self._after_id = None
+        self._popup = None
+        self._listbox = None
+        self._items: list[dict] = []
+        self._selected_name = None
+        self._selected_company = None
+
+        # Bindings
+        self.name_entry.bind("<KeyRelease>", self._on_keyrelease, add="+")
+        self.name_entry.bind("<FocusOut>", self._on_focus_out, add="+")
+        self.name_entry.bind("<Down>", self._on_down, add="+")
+        self.name_entry.bind("<Up>", self._on_up, add="+")
+        self.name_entry.bind("<Return>", self._on_return, add="+")
+        self.name_entry.bind("<Escape>", self._on_escape, add="+")
+
+    def _on_escape(self, _evt=None):
+        self._hide()
+
+    
+    def _move_selection(self, delta: int):
+        if not (self._popup and self._listbox and self._items):
+            return
+        lb = self._listbox
+        try:
+            cur = lb.curselection()
+            if cur:
+                idx = int(cur[0]) + delta
+            else:
+                idx = 0 if delta >= 0 else (len(self._items) - 1)
+            if idx < 0:
+                idx = 0
+            if idx >= len(self._items):
+                idx = len(self._items) - 1
+            lb.selection_clear(0, "end")
+            lb.selection_set(idx)
+            lb.activate(idx)
+            lb.see(idx)
+        except Exception:
+            pass
+
+    def _on_down(self, _evt=None):
+        # Keyboard nav without stealing focus (so the popup doesn't disappear).
+        if self._popup and self._listbox and self._items:
+            self._move_selection(+1)
+            return "break"
+        return None
+
+    def _on_up(self, _evt=None):
+        if self._popup and self._listbox and self._items:
+            self._move_selection(-1)
+            return "break"
+        return None
+
+    def _on_return(self, _evt=None):
+        # If popup is open, Enter selects the current highlighted item.
+        if self._popup and self._listbox and self._items:
+            try:
+                if not self._listbox.curselection() and len(self._items) > 0:
+                    self._listbox.selection_set(0)
+                    self._listbox.activate(0)
+            except Exception:
+                pass
+            return self._select(_evt)
+        return None
+
+    def _on_focus_out(self, _evt=None):
+        # If focus moves into the popup, don't hide.
+        try:
+            if self._popup and self._popup.focus_get() in (self._listbox,):
+                return
+        except Exception:
+            pass
+        self.root.after(150, self._hide)
+
+    def _on_keyrelease(self, _evt=None):
+        # Ignore navigation keys (Up/Down/Enter/Esc/etc). Otherwise KeyRelease will
+        # re-fetch suggestions and reset the highlight while the user is arrowing.
+        try:
+            ks = getattr(_evt, "keysym", "") if _evt is not None else ""
+            if ks in ("Up", "Down", "Return", "Escape", "Left", "Right", "Home", "End", "Prior", "Next", "Tab"):
+                return
+        except Exception:
+            pass
+        # Any manual typing should clear prior selected client_id and (optionally) auto-filled company.
+        typed = (self.name_entry.get() or "")
+        if self._selected_name is not None and typed != self._selected_name:
+            # user is changing away from the selected suggestion
+            try:
+                self.on_set_client_id(None)
+            except Exception:
+                pass
+            # Clear company if it still matches what we auto-filled
+            if self._selected_company is not None and (self.company_var.get() or "") == (self._selected_company or ""):
+                self.company_var.set("")
+            self._selected_name = None
+            self._selected_company = None
+
+        # debounce fetch
+        if self._after_id:
+            try:
+                self.root.after_cancel(self._after_id)
+            except Exception:
+                pass
+            self._after_id = None
+
+        q = typed.strip()
+        if len(q) < 2:
+            self._hide()
+            return
+
+        self._after_id = self.root.after(250, lambda: self._fetch(q))
+
+    def _fetch(self, q: str):
+        self._after_id = None
+
+        def on_ok(items):
+            try:
+                self._show(items or [])
+            except Exception:
+                self._hide()
+
+        def on_fail(_msg):
+            # Don't spam dialogs while typing; just hide the popup.
+            self._hide()
+
+        def api_fn():
+            return api_clients_suggest(q, limit=10, timeout=10)
+
+        # Use auth-aware caller if available so the FIRST keystroke can trigger login.
+        caller = self.auth_caller
+        if caller is not None and hasattr(caller, "_call_api_with_auth"):
+            try:
+                caller._call_api_with_auth(self.root, api_fn, on_ok, on_fail)
+                return
+            except Exception:
+                pass
+
+        # Fallback: plain worker thread (silent fail)
+        def worker():
+            try:
+                items = api_fn()
+            except Exception:
+                items = []
+            self.root.after(0, lambda: on_ok(items))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _ensure_popup(self):
+        if self._popup and self._listbox:
+            return
+        self._popup = tk.Toplevel(self.root)
+        self._popup.wm_overrideredirect(True)
+        self._popup.attributes("-topmost", True)
+        self._listbox = tk.Listbox(self._popup, height=6, exportselection=False)
+        self._listbox.pack(fill="both", expand=True)
+        self._listbox.bind("<ButtonRelease-1>", self._select, add="+")
+        self._listbox.bind("<Return>", self._select, add="+")
+        self._listbox.bind("<Up>", lambda e: (self._move_selection(-1), "break")[1], add="+")
+        self._listbox.bind("<Down>", lambda e: (self._move_selection(+1), "break")[1], add="+")
+        self._listbox.bind("<Escape>", lambda e: self._hide(), add="+")
+        self._listbox.bind("<FocusOut>", lambda e: self._hide(), add="+")
+
+    def _show(self, items: list[dict]):
+        # Only show if the entry is still focused
+        try:
+            if self.root.focus_get() is not self.name_entry:
+                return
+        except Exception:
+            return
+
+        self._items = items or []
+        if not self._items:
+            self._hide()
+            return
+
+        self._ensure_popup()
+        lb = self._listbox
+        lb.delete(0, "end")
+        for it in self._items:
+            nm = (it.get("client_name") or "").strip()
+            co = (it.get("company_name") or it.get("client_company_name") or it.get("client_company") or it.get("company") or "").strip()
+            label = f"{nm} — {co}" if co else nm
+            lb.insert("end", label)
+
+        # Position under entry
+        try:
+            x = self.name_entry.winfo_rootx()
+            y = self.name_entry.winfo_rooty() + self.name_entry.winfo_height()
+            w = max(self.name_entry.winfo_width(), 260)
+        except Exception:
+            x, y, w = 200, 200, 260
+
+        try:
+            self._popup.geometry(f"{w}x140+{x}+{y}")
+            self._popup.deiconify()
+            self._popup.lift()
+        except Exception:
+            pass
+
+    def _hide(self):
+        if self._popup:
+            try:
+                self._popup.withdraw()
+            except Exception:
+                pass
+
+    def _select(self, _evt=None):
+        if not (self._listbox and self._items):
+            return "break"
+        try:
+            sel = self._listbox.curselection()
+            if not sel:
+                return "break"
+            idx = int(sel[0])
+            it = self._items[idx]
+        except Exception:
+            return "break"
+
+        cid = it.get("id")
+        nm = (it.get("client_name") or "").strip()
+        co = (it.get("company_name") or it.get("client_company_name") or it.get("client_company") or it.get("company") or "").strip()
+
+        # Set entry text explicitly (do not rely on variable traces)
+        try:
+            self.name_entry.delete(0, "end")
+            self.name_entry.insert(0, nm)
+        except Exception:
+            pass
+        self.company_var.set(co)
+
+        self._selected_name = nm
+        self._selected_company = co
+
+        try:
+            self.on_set_client_id(int(cid) if cid is not None else None)
+        except Exception:
+            pass
+
+        self._hide()
+        try:
+            self.name_entry.focus_set()
+            self.name_entry.icursor("end")
+        except Exception:
+            pass
+        return "break"
+
 class NewOrderDialog(tk.Toplevel):
     def __init__(self, parent, prefill: dict | None = None):
         super().__init__(parent)
@@ -524,11 +866,13 @@ class NewOrderDialog(tk.Toplevel):
 
         ttk.Label(form, text="Client Name").grid(row=1, column=0, sticky="w", pady=(10, 0))
         self.client_name_var = tk.StringVar()
-        ttk.Entry(form, textvariable=self.client_name_var, width=28).grid(row=1, column=1, sticky="w", padx=(0, 18), pady=(10, 0))
+        self.client_name_entry = ttk.Entry(form, textvariable=self.client_name_var, width=28)
+        self.client_name_entry.grid(row=1, column=1, sticky="w", padx=(0, 18), pady=(10, 0))
 
         ttk.Label(form, text="Client Company").grid(row=1, column=2, sticky="w", pady=(10, 0))
         self.client_company_var = tk.StringVar()
-        ttk.Entry(form, textvariable=self.client_company_var, width=34).grid(row=1, column=3, sticky="w", pady=(10, 0))
+        self.client_company_entry = ttk.Entry(form, textvariable=self.client_company_var, width=34)
+        self.client_company_entry.grid(row=1, column=3, sticky="w", pady=(10, 0))
 
         ttk.Label(form, text="Rep").grid(row=2, column=0, sticky="w", pady=(10, 0))
         self.rep_var = tk.StringVar(value=REP_FULL[0])
@@ -539,6 +883,10 @@ class NewOrderDialog(tk.Toplevel):
             width=44,
             state="readonly",
         ).grid(row=2, column=1, columnspan=3, sticky="w", pady=(10, 0))
+        # Client selection state (optional)
+        self._client_id: int | None = None
+        self._client_typeahead = _ClientTypeahead(self, self.client_name_entry, self.client_company_var, self._set_client_id, auth_caller=getattr(self, 'parent', None))
+
         notes_frame = ttk.Frame(self)
         notes_frame.pack(fill="both", expand=True, padx=10, pady=(10, 10))
         ttk.Label(notes_frame, text="Notes").pack(anchor="w")
@@ -550,6 +898,10 @@ class NewOrderDialog(tk.Toplevel):
         self.create_btn = ttk.Button(btns, text="Create", command=self.on_create)
         self.create_btn.pack(side="left")
         ttk.Button(btns, text="Cancel", command=self.destroy).pack(side="left", padx=(10, 0))
+
+
+    def _set_client_id(self, cid: int | None) -> None:
+        self._client_id = cid
 
     def _apply_prefill(self):
         self.artist_var.set((self.prefill.get("artist") or "").strip())
@@ -579,6 +931,7 @@ class NewOrderDialog(tk.Toplevel):
             "asset_type": asset,
             "notes": (self.notes_text.get("1.0", "end") or "").strip(),
             "rep_name": (self.rep_var.get() or REP_FULL[0]).strip(),
+            "rep_code": rep_initials((self.rep_var.get() or REP_FULL[0]).strip()),
         }
         cn = (self.client_name_var.get() or "").strip()
         cco = (self.client_company_var.get() or "").strip()
@@ -586,11 +939,21 @@ class NewOrderDialog(tk.Toplevel):
             payload["client_name"] = cn
         if cco:
             payload["client_company_name"] = cco
+        # If user selected an existing client, send client_id (server will snapshot name/company)
+        if getattr(self, "_client_id", None) is not None:
+            payload["client_id"] = int(self._client_id)
 
         self.create_btn.configure(state="disabled")
         self.status_var.set("Creating…")
 
         def api_fn():
+            # If user free-typed a NEW client (no suggestion selected), create it so it appears next time.
+            if "client_id" not in payload:
+                cn = (payload.get("client_name") or "").strip()
+                if cn:
+                    cid = api_clients_create_best_effort(cn, payload.get("client_company_name") or "")
+                    if cid is not None:
+                        payload["client_id"] = int(cid)
             return http_post_json(f"{API_BASE}/orders/new", payload=payload, timeout=20)
 
         def on_ok(created):
@@ -699,6 +1062,15 @@ class OrderDetailsWindow(tk.Toplevel):
         self._wire_autosave()
         self.refresh()
 
+        self._mark_dirty()
+
+    def _set_client_id(self, cid: int | None) -> None:
+        self._client_id = cid
+        try:
+            self._mark_dirty()
+        except Exception:
+            pass
+
     def _build_ui(self):
         header = ttk.Frame(self)
         header.pack(fill="x", padx=10, pady=8)
@@ -777,6 +1149,14 @@ class OrderDetailsWindow(tk.Toplevel):
             e.grid(row=row + 1, column=col, sticky="w", padx=(0, 16), pady=(0, 10))
             self.vars[label] = (v, e)
 
+            # Keep direct references for client typeahead wiring
+            if label == "Client Name":
+                self.client_name_entry = e
+                self.client_name_var = v
+            elif label == "Client Company":
+                self.client_company_entry = e
+                self.client_company_var = v
+
         add_row(0, 0, "Artist", 46)
         add_row(0, 1, "Asset Type", 18)
         add_row(0, 2, "SP Number", 18)
@@ -796,6 +1176,10 @@ class OrderDetailsWindow(tk.Toplevel):
         self.rep_cb = ttk.Combobox(body, textvariable=self.rep_var, values=REP_FULL, width=30, state="disabled")
         self.rep_cb.grid(row=7, column=0, sticky="w", pady=(0, 10), padx=(0, 16))
         self.vars["Rep"] = (self.rep_var, self.rep_cb)
+
+        # Client selection state (optional)
+        self._client_id: int | None = None
+        self._client_typeahead = _ClientTypeahead(self, self.client_name_entry, self.client_company_var, self._set_client_id, auth_caller=getattr(self, 'parent', None))
 
         notes_frame = ttk.Frame(self)
         notes_frame.pack(fill="both", expand=True, padx=10, pady=(0, 10))
@@ -849,6 +1233,10 @@ class OrderDetailsWindow(tk.Toplevel):
 
     def _apply_order(self, data: dict):
         self.order_data = data
+        try:
+            self._client_id = data.get("client_id")
+        except Exception:
+            self._client_id = None
         self._suspend_dirty = True
         status = (data.get("status") or "").strip().lower()
         sp = data.get("sp") or {}
@@ -984,6 +1372,7 @@ class OrderDetailsWindow(tk.Toplevel):
             "client_name": d["client_name"] or None,
             "client_company_name": d["client_company_name"] or None,
             "rep_name": d["rep_name"],
+            "rep_code": rep_initials(d["rep_name"]),
             "asset_type": at,
         }
 
@@ -1024,6 +1413,13 @@ class OrderDetailsWindow(tk.Toplevel):
         self.save_btn.configure(state="disabled")
 
         def api_fn():
+            # If user free-typed a NEW client (no suggestion selected), create it so it appears next time.
+            if "client_id" not in payload:
+                cn = (payload.get("client_name") or "").strip()
+                if cn:
+                    cid = api_clients_create_best_effort(cn, payload.get("client_company_name") or "")
+                    if cid is not None:
+                        payload["client_id"] = int(cid)
             return http_patch_json(f"{API_BASE}/orders/{self.order_id}", payload=payload, timeout=30)
 
         def on_ok(updated):
@@ -1316,8 +1712,14 @@ class OrderDetailsWindow(tk.Toplevel):
             "notes": (self.notes_text.get("1.0", "end") or "").strip(),
             "client_name": self.vars["Client Name"][0].get().strip() or None,
             "client_company_name": self.vars["Client Company"][0].get().strip() or None,
+            # If a client was selected from suggestions, send client_id (server snapshots name/company)
+            "client_id": int(self._client_id) if getattr(self, "_client_id", None) is not None else None,
             "rep_name": (self.vars.get("Rep", (tk.StringVar(value=REP_FULL[0]), None))[0].get() or REP_FULL[0]).strip(),
         }
+        # Drop client_id if not set (so free-typed client fields work normally)
+        if payload.get("client_id") is None:
+            payload.pop("client_id", None)
+
         # Asset Type is editable while the order is editable (draft / override edit).
         at = (self.vars["Asset Type"][0].get() or "").strip().lower()
         if at not in ("radio", "video", "art"):
@@ -1445,6 +1847,88 @@ class OrderDetailsWindow(tk.Toplevel):
 # -----------------------------
 # Search GUI
 # -----------------------------
+
+class LoginDialog(tk.Toplevel):
+    def __init__(self, parent, prefill_username: str = ""):
+        super().__init__(parent)
+        self.title("Login")
+        self.resizable(False, False)
+        self.result = None
+
+        try:
+            self.transient(parent)
+        except Exception:
+            pass
+
+        frm = ttk.Frame(self, padding=12)
+        frm.pack(fill="both", expand=True)
+
+        ttk.Label(frm, text="Username").grid(row=0, column=0, sticky="w")
+        self.username_var = tk.StringVar(value=prefill_username or "")
+        u = ttk.Entry(frm, textvariable=self.username_var, width=28)
+        u.grid(row=1, column=0, sticky="we", pady=(2, 10))
+
+        ttk.Label(frm, text="Password").grid(row=2, column=0, sticky="w")
+        self.password_var = tk.StringVar(value="")
+        p = ttk.Entry(frm, textvariable=self.password_var, width=28, show="*")
+        p.grid(row=3, column=0, sticky="we", pady=(2, 10))
+
+        btns = ttk.Frame(frm)
+        btns.grid(row=4, column=0, sticky="e")
+
+        ok_btn = ttk.Button(btns, text="OK", command=self._ok)
+        ok_btn.pack(side="left", padx=(0, 8))
+        ttk.Button(btns, text="Cancel", command=self._cancel).pack(side="left")
+
+        frm.columnconfigure(0, weight=1)
+
+        self.bind("<Return>", lambda e: self._ok())
+        self.bind("<Escape>", lambda e: self._cancel())
+
+        # Center on parent
+        self.update_idletasks()
+        try:
+            px = parent.winfo_rootx()
+            py = parent.winfo_rooty()
+            pw = parent.winfo_width()
+            ph = parent.winfo_height()
+            w = self.winfo_width()
+            h = self.winfo_height()
+            x = px + max(0, (pw - w) // 2)
+            y = py + max(0, (ph - h) // 2)
+            self.geometry(f"+{x}+{y}")
+        except Exception:
+            pass
+
+        try:
+            self.grab_set()
+        except Exception:
+            pass
+        try:
+            self.focus_force()
+        except Exception:
+            pass
+
+        # initial focus
+        if self.username_var.get().strip():
+            p.focus_set()
+        else:
+            u.focus_set()
+
+    def _ok(self):
+        username = (self.username_var.get() or "").strip()
+        password = self.password_var.get() or ""
+        if not username or not password:
+            messagebox.showerror("Login", "Username and password required.", parent=self)
+            return
+        self.result = (username, password)
+        self.destroy()
+
+    def _cancel(self):
+        self.result = None
+        self.destroy()
+
+
 class OrderSearchGUI(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -1743,6 +2227,7 @@ class OrderSearchGUI(tk.Tk):
         self.show_id_btn.pack(side="right", padx=(0, 10))
         self.admin_btn = ttk.Button(btns_right, text="Admin", command=self.open_admin_users, state="disabled")
         self.admin_btn.pack(side="right", padx=(0, 10))
+        # Deleted Orders button removed from main search page (admin-only via Admin Users window)
 
         # Tree
         cols = self._tree_columns()
@@ -2013,8 +2498,16 @@ class OrderSearchGUI(tk.Tk):
         try:
             if self._is_admin:
                 self.admin_btn.configure(state="normal")
+                try:
+                    if self.deleted_orders_btn: self.deleted_orders_btn.configure(state="normal")
+                except Exception:
+                    pass
             else:
                 self.admin_btn.configure(state="disabled")
+                try:
+                    if self.deleted_orders_btn: self.deleted_orders_btn.configure(state="disabled")
+                except Exception:
+                    pass
         except Exception:
             pass
 
@@ -2491,94 +2984,53 @@ class DeletedOrdersWindow(tk.Toplevel):
 
     def _build_ui(self):
         top = ttk.Frame(self)
-        top.pack(fill="both", expand=True, padx=10, pady=10)
+        top.pack(fill="x", padx=10, pady=10)
 
-        cols = ("sp", "id", "asset_type", "artist", "status", "deleted_at", "deleted_by")
-        self.tree = ttk.Treeview(top, columns=cols, show="headings", selectmode="browse")
+        ttk.Button(top, text="Refresh", command=self.refresh).pack(side="left")
+        ttk.Button(top, text="Restore Selected", command=self.restore_selected).pack(side="left", padx=(10, 0))
+        ttk.Label(top, textvariable=self.msg_var).pack(side="right")
 
-        headings = {
-            "sp": "SP#",
-            "id": "ID",
-            "asset_type": "Type",
-            "artist": "Artist",
-            "status": "Status",
-            "deleted_at": "Deleted At",
-            "deleted_by": "By",
-        }
-        widths = {
-            "sp": 120,
-            "id": 70,
-            "asset_type": 80,
-            "artist": 360,
-            "status": 110,
-            "deleted_at": 170,
-            "deleted_by": 80,
-        }
+        cols = ("SP", "id", "asset_type", "artist", "status", "deleted_at", "deleted_by")
+        self.tree = ttk.Treeview(self, columns=cols, show="headings", height=22, selectmode="browse")
         for c in cols:
-            self.tree.heading(c, text=headings.get(c, c))
-            self.tree.column(c, width=widths.get(c, 120), anchor="w", stretch=(c == "artist"))
+            self.tree.heading(c, text=c)
+            w = 120
+            if c == "SP":
+                w = 110
+            if c == "id":
+                w = 70
+            if c == "artist":
+                w = 240
+            if c == "deleted_at":
+                w = 180
+            if c == "deleted_by":
+                w = 120
+            self.tree.column(c, width=w, anchor="w")
+        self.tree.pack(fill="both", expand=True, padx=10, pady=(0, 10))
 
-        yscroll = ttk.Scrollbar(top, orient="vertical", command=self.tree.yview)
-        xscroll = ttk.Scrollbar(top, orient="horizontal", command=self.tree.xview)
-        self.tree.configure(yscrollcommand=yscroll.set, xscrollcommand=xscroll.set)
-
-        self.tree.grid(row=0, column=0, sticky="nsew")
-        yscroll.grid(row=0, column=1, sticky="ns")
-        xscroll.grid(row=1, column=0, sticky="ew")
-
-        top.rowconfigure(0, weight=1)
-        top.columnconfigure(0, weight=1)
-
-        bottom = ttk.Frame(self)
-        bottom.pack(fill="x", padx=10, pady=(0, 10))
-
-        ttk.Label(bottom, textvariable=self.msg_var).pack(side="left", padx=(0, 10))
-
-        ttk.Button(bottom, text="Refresh", command=self.refresh).pack(side="right", padx=(6, 0))
-        ttk.Button(bottom, text="Restore Selected", command=self.restore_selected).pack(side="right")
-        ttk.Button(bottom, text="Close", command=self.destroy).pack(side="right", padx=(0, 6))
-
-        self.tree.bind("<Double-1>", lambda _e: self.restore_selected())
+        self.tree.bind("<Return>", lambda _e: self.restore_selected())
 
     def refresh(self):
         self._req_id += 1
         req_id = self._req_id
-        self.msg_var.set("Loading deleted orders...")
+        self.msg_var.set("Loading…")
 
         def api_fn():
-            # IMPORTANT: do NOT call GET /orders/{id} for deleted orders (backend returns 404).
-            return http_get_json(f"{API_BASE}/orders/deleted?limit=500&offset=0", timeout=25)
-
-        def on_ok(data):
-            if req_id != self._req_id:
-                return
-            self.msg_var.set("")
-            # Normalize payload shapes:
-            items = []
-            total = None
-            if isinstance(data, dict):
-                items = data.get("items") or data.get("results") or data.get("orders") or []
-                total = data.get("total")
-            elif isinstance(data, list):
-                items = data
-            else:
-                items = []
-
-            # Rebuild rows
-            for iid in self.tree.get_children():
-                self.tree.delete(iid)
-
-            for it in items or []:
-                if not isinstance(it, dict):
-                    continue
+            # Get deleted summaries, then fetch details per order to get SP number.
+            data = http_get_json(f"{API_BASE}/orders/deleted?limit=50&offset=0", timeout=25)
+            items = (data or {}).get("items") or []
+            rows = []
+            for it in items:
                 oid = it.get("id")
-                # Try multiple possible keys for SP number without extra API calls.
-                sp_num = it.get("sp_number") or ""
-                if not sp_num:
-                    sp = it.get("sp")
-                    if isinstance(sp, dict):
+                sp_num = ""
+                try:
+                    if oid is not None:
+                        detail = http_get_json(f"{API_BASE}/orders/{oid}", timeout=20)
+                        sp = (detail or {}).get("sp") or {}
                         sp_num = sp.get("sp_number") or ""
-                row = (
+                except Exception:
+                    sp_num = ""
+                rows.append((
                     sp_num,
                     oid,
                     it.get("asset_type") or "",
@@ -2586,12 +3038,18 @@ class DeletedOrdersWindow(tk.Toplevel):
                     it.get("status") or "",
                     it.get("deleted_at") or "",
                     it.get("deleted_by") or "",
-                )
-                self.tree.insert("", "end", values=row)
+                ))
+            return {"rows": rows}
 
-            if total is None:
-                total = len(items or [])
-            self.msg_var.set(f"{total} deleted orders")
+        def on_ok(res):
+            if req_id != self._req_id:
+                return
+            for iid in self.tree.get_children():
+                self.tree.delete(iid)
+            rows = (res or {}).get("rows") or []
+            for r in rows:
+                self.tree.insert("", "end", values=r)
+            self.msg_var.set(f"{len(rows)} deleted orders")
 
         def on_fail(msg):
             if req_id != self._req_id:
@@ -2602,6 +3060,7 @@ class DeletedOrdersWindow(tk.Toplevel):
         if hasattr(self.parent, "_call_api_with_auth"):
             self.parent._call_api_with_auth(self, api_fn, on_ok, on_fail)
         else:
+            # Fallback (shouldn't happen)
             try:
                 on_ok(api_fn())
             except Exception as e:
@@ -2612,36 +3071,36 @@ class DeletedOrdersWindow(tk.Toplevel):
         if not sel:
             messagebox.showinfo("Restore", "Select an order first.", parent=self)
             return
-
         vals = self.tree.item(sel[0], "values") or ()
-        # columns: sp, id, ...
-        order_id = None
-        if len(vals) >= 2:
-            order_id = vals[1]
-        if order_id in (None, "", "None"):
-            messagebox.showerror("Restore", "Could not determine order ID.", parent=self)
+        if len(vals) < 2:
+            return
+        order_id = vals[1]
+        if not order_id:
             return
 
-        # Convert to int-ish string
-        try:
-            order_id_int = int(str(order_id))
-        except Exception:
-            messagebox.showerror("Restore", f"Invalid order ID: {order_id}", parent=self)
+        if not messagebox.askokcancel("Restore", f"Restore deleted order {order_id}?", parent=self):
             return
 
-        self.msg_var.set("Restoring...")
+        self.msg_var.set("Restoring…")
 
         def api_fn():
-            return http_post_json(f"{API_BASE}/orders/{order_id_int}/restore", payload=None, timeout=25)
+            return http_post_json(f"{API_BASE}/orders/{order_id}/restore", body={}, timeout=25)
 
-        def on_ok(_data):
-            self.msg_var.set("")
-            # Refresh deleted list and the main search list (best effort)
-            self.refresh()
+        def on_ok(_res):
+            # Remove from list
             try:
-                self.parent.run_search()
+                self.tree.delete(sel[0])
             except Exception:
                 pass
+            self.msg_var.set("Restored")
+            # Refresh main search list
+            try:
+                self.parent.run_search(silent=True)
+            except Exception:
+                try:
+                    self.parent.run_search()
+                except Exception:
+                    pass
 
         def on_fail(msg):
             self.msg_var.set("")
@@ -2654,7 +3113,6 @@ class DeletedOrdersWindow(tk.Toplevel):
                 on_ok(api_fn())
             except Exception as e:
                 on_fail(str(e))
-
 
 
 def main():

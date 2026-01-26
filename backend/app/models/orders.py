@@ -24,6 +24,8 @@ class Order(Base):
     rep_code = Column(String(10), nullable=False, server_default=text("'SB'"))
 
     # Client fields
+    client_id = Column(Integer, ForeignKey("clients.id"), nullable=True)
+
     client_name = Column(String, nullable=True)
     client_company_name = Column(String, nullable=True)
 
@@ -64,6 +66,9 @@ class Order(Base):
     updated_at = Column(String, nullable=True)
     # Relationship to SP
     sp = relationship(SPNumber, backref="orders")
+
+    # Relationship to Client (optional; Orders also store snapshot client_name/company_name)
+    client = relationship("Client", backref="orders")
 
     # Optional convenience relationships
     created_by_user = relationship("User", foreign_keys=[created_by_user_id])

@@ -1,5 +1,32 @@
 (() => {
   const API_URL = "/orders/search2";
+
+  // ----- Clients: best-effort create so new names appear in suggest (fast v1)
+  async function ensureClientExists(clientName, companyName) {
+    const name = (clientName || "").trim();
+    const company = (companyName || "").trim();
+    if (!name) return null;
+
+    try {
+      const res = await fetch("/orders/clients", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json", "Accept": "application/json" },
+        body: JSON.stringify({
+          client_name: name,
+          company_name: company || null,
+          is_active: true
+        })
+      });
+      if (!res.ok) return null;
+      const data = await res.json();
+      if (data && data.id != null) return data.id;
+      return null;
+    } catch (_e) {
+      return null;
+    }
+  }
+
   const PAGE_SIZE = 50; // change later when you decide defaults
 
   let offset = 0;
@@ -26,11 +53,19 @@
     return null;
   };
 
+  const pick = (...ids) => {
+    for (let i = 0; i < ids.length; i++) {
+      const el = $(ids[i]);
+      if (el) return el;
+    }
+    return null;
+  };
+
   const els = {
     artist: $("artist"),
     notes: $("notes"),
     client_name: $("client_name"),
-    client_company: $("client_company"),
+    client_company: pick("client_company","client_company_name","client_company_name_filter","client_company_filter"),
     asset_type: $("asset_type"),
     status: $("status"),
     rep_code: $("rep_code"),
@@ -47,6 +82,19 @@
     rows: $("rows"),
   };
 
+  const val = (el) => {
+    try { return el ? String(el.value ?? "") : ""; } catch (_) { return ""; }
+  };
+  const setVal = (el, v) => {
+    try { if (el) el.value = String(v ?? ""); } catch (_) {}
+  };
+  const isChecked = (el) => {
+    try { return !!(el && el.checked); } catch (_) { return false; }
+  };
+  const setChecked = (el, v) => {
+    try { if (el) el.checked = !!v; } catch (_) {}
+  };
+
 
   const STATE_KEY = "byp_ops_search_state_v1";
 
@@ -54,15 +102,15 @@
     try {
       const state = {
         offset,
-        artist: els.artist.value,
-        notes: els.notes.value,
-        client_name: els.client_name.value,
-        client_company: els.client_company.value,
-        asset_type: els.asset_type.value,
-        status: els.status.value,
-        rep_code: els.rep_code.value,
-        sp_number: els.sp_number.value,
-        include_deleted: !!els.include_deleted.checked,
+        artist: val(els.artist),
+        notes: val(els.notes),
+        client_name: val(els.client_name),
+        client_company: val(els.client_company),
+        asset_type: val(els.asset_type),
+        status: val(els.status),
+        rep_code: val(els.rep_code),
+        sp_number: val(els.sp_number),
+        include_deleted: isChecked(els.include_deleted),
       };
       sessionStorage.setItem(STATE_KEY, JSON.stringify(state));
     } catch (_) {
@@ -77,15 +125,15 @@
       const state = JSON.parse(raw);
       if (!state || typeof state !== "object") return false;
 
-      els.artist.value = state.artist ?? "";
-      els.notes.value = state.notes ?? "";
-      els.client_name.value = state.client_name ?? "";
-      els.client_company.value = state.client_company ?? "";
-      els.asset_type.value = state.asset_type ?? "";
-      els.status.value = state.status ?? "";
-      els.rep_code.value = state.rep_code ?? "";
-      els.sp_number.value = state.sp_number ?? "";
-      els.include_deleted.checked = !!state.include_deleted;
+      setVal(els.artist, state.artist ?? "");
+      setVal(els.notes, state.notes ?? "");
+      setVal(els.client_name, state.client_name ?? "");
+      setVal(els.client_company, state.client_company ?? "");
+      setVal(els.asset_type, state.asset_type ?? "");
+      setVal(els.status, state.status ?? "");
+      setVal(els.rep_code, state.rep_code ?? "");
+      setVal(els.sp_number, state.sp_number ?? "");
+      setChecked(els.include_deleted, !!state.include_deleted);
 
       offset = Number(state.offset ?? 0) || 0;
       if (offset < 0) offset = 0;
@@ -114,14 +162,15 @@
       if (s) p.set(k, s);
     };
 
-    add("artist", els.artist.value);
-    add("notes", els.notes.value);
-    add("client_name", els.client_name.value);
-    add("client_company", els.client_company.value);
-    add("asset_type", els.asset_type.value);
-    add("status", els.status.value);
-    add("rep_code", els.rep_code.value);
-    add("sp_number", els.sp_number.value);
+    add("artist", val(els.artist));
+    add("notes", val(els.notes));
+    add("client_name", val(els.client_name));
+    add("client_company", val(els.client_company));
+    add("client_company_name", val(els.client_company));
+add("asset_type", val(els.asset_type));
+    add("status", val(els.status));
+    add("rep_code", val(els.rep_code));
+    add("sp_number", val(els.sp_number));
 
     p.set("limit", String(PAGE_SIZE));
     p.set("offset", String(offset));
@@ -131,12 +180,12 @@
   }
 
   function setPagerButtons() {
-    els.prevBtn.disabled = offset <= 0;
-    els.nextBtn.disabled = (offset + PAGE_SIZE) >= total;
+    if (els.prevBtn) els.prevBtn.disabled = offset <= 0;
+    if (els.nextBtn) els.nextBtn.disabled = (offset + PAGE_SIZE) >= total;
   }
 
   function clearTable() {
-    els.rows.innerHTML = "";
+    if (els.rows) els.rows.innerHTML = "";
   }
 
   function setTableHeaders() {
@@ -188,7 +237,7 @@
         if (e.key === "Enter") openDetail(o.id);
       });
 
-      els.rows.appendChild(tr);
+      if (els.rows) els.rows.appendChild(tr);
     }
   }
 
@@ -197,8 +246,8 @@
 
     // Persist current filters + paging so Back works without re-searching.
     saveState();
-    els.error.textContent = "";
-    els.summary.textContent = "Searching…";
+    if (els.error) els.error.textContent = "";
+    if (els.summary) els.summary.textContent = "Searching…";
 
     const url = API_URL + "?" + buildQuery();
 
@@ -216,7 +265,7 @@
       const start = total === 0 ? 0 : offset + 1;
       const end = Math.min(offset + items.length, total);
 
-      els.summary.textContent = total === 0
+      if (els.summary) els.summary.textContent = total === 0
         ? "0 results."
         : ("Showing " + start + "–" + end + " of " + total + ".");
 
@@ -227,21 +276,21 @@
       total = 0;
       setPagerButtons();
       clearTable();
-      els.summary.textContent = "Error.";
-      els.error.textContent = e && e.message ? e.message : String(e);
+      if (els.summary) els.summary.textContent = "Error.";
+      if (els.error) els.error.textContent = e && e.message ? e.message : String(e);
     }
   }
 
   function clearFilters() {
-els.artist.value = "";
-    els.notes.value = "";
-    els.client_name.value = "";
-    els.client_company.value = "";
-    els.asset_type.value = "";
-    els.status.value = "";
-    els.rep_code.value = "";
-    els.sp_number.value = "";
-    els.include_deleted.checked = false;
+setVal(els.artist, "");
+    setVal(els.notes, "");
+    setVal(els.client_name, "");
+    setVal(els.client_company, "");
+    setVal(els.asset_type, "");
+    setVal(els.status, "");
+    setVal(els.rep_code, "");
+    setVal(els.sp_number, "");
+    setChecked(els.include_deleted, false);
 
     offset = 0;
     total = 0;
@@ -253,10 +302,9 @@ els.artist.value = "";
   }
 
   // Wire up events
-  els.searchBtn.addEventListener("click", () => runSearch(true));
-  els.clearBtn.addEventListener("click", () => clearFilters());
-
-  // ----- New Order (web-only) -----
+  if (els.searchBtn) els.searchBtn.addEventListener("click", () => runSearch(true));
+if (els.clearBtn) els.clearBtn.addEventListener("click", () => clearFilters());
+// ----- New Order (web-only) -----
   // Minimal create flow: Artist + Asset Type required (per OpenAPI OrderCreate). Optional notes + client fields.
   // Keep in sync with desktop GUI REP_FULL (source of truth for now)
   const REP_FULL = [
@@ -379,6 +427,13 @@ els.artist.value = "";
       .byp-actions{ display:flex; gap:10px; justify-content:flex-end; margin-top:12px; flex-wrap:wrap; }
       .byp-hint{ font-size:12px; color:#666; }
       .byp-err{ color:#b00020; font-weight:700; white-space:pre-wrap; }
+      .byp-suggest{ position:absolute; left:0; right:0; top:calc(100% + 2px);
+        background:#fff; border:1px solid #ccc; border-radius:10px; box-shadow:0 8px 20px rgba(0,0,0,.12);
+        max-height:220px; overflow:auto; z-index:10000; display:none; }
+      .byp-suggest-item{ padding:8px 10px; cursor:pointer; font-size:13px; }
+      .byp-suggest-item:hover{ background:#f3f3f3; }
+      .byp-suggest-item.active{ background:#93c5fd; }
+      .byp-suggest-muted{ color:#666; font-size:12px; }
     `;
     document.head.appendChild(style);
   }
@@ -403,12 +458,16 @@ els.artist.value = "";
 
       <div class="byp-row">
         <label for="no_client_name">Client Name *</label>
-        <input id="no_client_name" type="text" placeholder="Client name" />
-      </div>
+        <div style="position:relative;">
+          <input id="no_client_name" type="text" placeholder="Client name" autocomplete="new-password" />
+          <input id="no_client_id" type="hidden" />
+          <div id="no_client_suggest" class="byp-suggest"></div>
+        </div>
+</div>
 
       <div class="byp-row">
         <label for="no_client_company">Company Name *</label>
-        <input id="no_client_company" type="text" placeholder="Company name" />
+        <input id="no_client_company" type="text" placeholder="Company name" autocomplete="new-password" />
       </div>
 
       <div class="byp-row">
@@ -437,6 +496,212 @@ els.artist.value = "";
     const repEl = $m("no_rep");
     const clientNameEl = $m("no_client_name");
     const clientCompanyEl = $m("no_client_company");
+    const clientIdEl = $m("no_client_id");
+    const clientSuggestBox = $m("no_client_suggest");
+
+    // --- Client typeahead (New Order) ---
+    let clientSuggestTimer = null;
+    let clientSelectedCompany = null;
+    let clientSuggestItems = [];
+    let clientSuggestIndex = -1;
+
+    function hideClientSuggest() {
+      if (!clientSuggestBox) return;
+      clientSuggestBox.style.display = "none";
+      clientSuggestBox.innerHTML = "";
+      clientSuggestItems = [];
+      clientSuggestIndex = -1;
+    }
+
+    async function fetchClientSuggest(q) {
+      try {
+        const res = await fetch("/orders/clients/suggest?q=" + encodeURIComponent(q) + "&limit=10", { credentials: "same-origin" });
+        if (!res.ok) return [];
+        const data = await res.json();
+
+        // API may return a raw array OR a wrapper object like { value: [...], Count: N } / { items: [...] }.
+        if (Array.isArray(data)) return data;
+        if (data && Array.isArray(data.value)) return data.value;
+        if (data && Array.isArray(data.items)) return data.items;
+        if (data && Array.isArray(data.results)) return data.results;
+
+        return [];
+      } catch (_) {
+        return [];
+      }
+    }
+
+    
+function setClientSuggestActive(idx) {
+  if (!clientSuggestBox) return;
+  const kids = Array.from(clientSuggestBox.querySelectorAll(".byp-suggest-item"));
+  if (!kids.length) { clientSuggestIndex = -1; return; }
+  let n = idx;
+  if (n < 0) n = 0;
+  if (n >= kids.length) n = kids.length - 1;
+
+  kids.forEach((el, i) => {
+    el.style.background = (i === n) ? "#93c5fd" : "transparent";
+    el.style.border = (i === n) ? "1px solid #1d4ed8" : "1px solid transparent";
+    el.style.borderRadius = "8px";
+    el.setAttribute("aria-selected", (i === n) ? "true" : "false");
+  });
+
+  clientSuggestIndex = n;
+  try { kids[n].scrollIntoView({ block: "nearest" }); } catch (_) {}
+}
+
+function applyClientSuggestItem(it) {
+  if (!it) return;
+  const nm = String(it.client_name || "").trim();
+  const co = String(it.company_name || it.client_company_name || it.client_company || it.company || "").trim();
+  try { clientNameEl.value = nm; } catch (_) {}
+  try { clientCompanyEl.value = co; } catch (_) {}
+  try { clientIdEl.value = String(it.id ?? ""); } catch (_) {}
+  clientSelectedCompany = co || null;
+  hideClientSuggest();
+  try { clientNameEl.focus(); clientNameEl.setSelectionRange(clientNameEl.value.length, clientNameEl.value.length); } catch (_) {}
+}
+
+function maybeAutofillCompanyFromExactMatch(typedName, items) {
+  try {
+    const want = String(typedName || "").trim().toLowerCase();
+    if (!want) return;
+
+    // Don't overwrite something the user already typed.
+    const coNow = String(clientCompanyEl && clientCompanyEl.value || "").trim();
+    if (coNow) return;
+
+    let best = null;
+    let bestCompany = "";
+
+    const getCo = (x) => {
+      try { return String(x.company_name || x.client_company_name || x.client_company || x.company || "").trim(); }
+      catch (_e) { return ""; }
+    };
+
+    for (let i = 0; i < (items || []).length; i++) {
+      const it = items[i];
+      const nm = String(it && it.client_name || "").trim();
+      if (!nm) continue;
+      if (nm.toLowerCase() !== want) continue;
+
+      const co = getCo(it);
+      if (!best) best = it;
+      if (co) { best = it; bestCompany = co; break; }
+    }
+
+    if (!best) return;
+
+    bestCompany = bestCompany || getCo(best);
+    if (bestCompany) {
+      try { clientCompanyEl.value = bestCompany; } catch (_) {}
+      try { clientIdEl.value = String(best.id ?? ""); } catch (_) {}
+      clientSelectedCompany = bestCompany || null;
+    }
+  } catch (_e) {}
+}
+
+function selectActiveClientSuggest() {
+  if (clientSuggestIndex < 0 || clientSuggestIndex >= clientSuggestItems.length) return false;
+  applyClientSuggestItem(clientSuggestItems[clientSuggestIndex]);
+  return true;
+}
+
+function renderClientSuggest(items) {
+      if (!clientSuggestBox) return;
+      if (!items || !items.length) { hideClientSuggest(); return; }
+      clientSuggestBox.innerHTML = "";
+      clientSuggestItems = Array.isArray(items) ? items.slice() : [];
+      clientSuggestIndex = -1;
+      for (let i = 0; i < items.length; i++) {
+        const it = items[i];
+        const nm = String(it.client_name || "").trim();
+        const co = String(it.company_name || it.client_company_name || it.client_company || it.company || "").trim();
+        const div = document.createElement("div");
+        div.className = "byp-suggest-item";
+        div.setAttribute("role", "option");
+        div.style.padding = "8px 10px";
+        div.style.cursor = "pointer";
+        div.style.userSelect = "none";
+        div.style.borderRadius = "8px";
+        div.style.background = "transparent";
+        div.textContent = co ? (nm + " — " + co) : nm;
+        div.addEventListener("mouseenter", () => { setClientSuggestActive(i); });
+        div.addEventListener("mousedown", (e) => {
+          e.preventDefault();
+          applyClientSuggestItem(it);
+        });
+        clientSuggestBox.appendChild(div);
+      }
+      clientSuggestBox.setAttribute("role", "listbox");
+      clientSuggestBox.style.display = "block";
+    }
+
+    
+function onClientNameKeyDown(e) {
+  if (!clientSuggestBox || clientSuggestBox.style.display !== "block") return;
+  const k = e.key || "";
+  const code = e.keyCode || 0;
+
+  if (k === "ArrowDown" || code === 40) {
+    e.preventDefault();
+    if (clientSuggestIndex < 0) setClientSuggestActive(0);
+    else setClientSuggestActive(clientSuggestIndex + 1);
+  } else if (k === "ArrowUp" || code === 38) {
+    e.preventDefault();
+    if (clientSuggestIndex < 0) setClientSuggestActive(0);
+    else setClientSuggestActive(clientSuggestIndex - 1);
+  } else if (k === "Enter" || code === 13) {
+    if (clientSuggestIndex >= 0) {
+      e.preventDefault();
+      selectActiveClientSuggest();
+    }
+  } else if (k === "Escape" || code === 27) {
+    e.preventDefault();
+    hideClientSuggest();
+  }
+}
+
+function onClientNameInput() {
+      const q = String(clientNameEl.value || "").trim();
+
+      // If user is typing after selecting a client, clear client_id and (if we auto-filled it) company
+      if (clientIdEl && clientIdEl.value) {
+        // If current value no longer equals the selected client name, treat as manual edit
+        // (best-effort; we don't store selected name separately)
+        // Clearing here is safer than silently keeping an old client_id.
+        clientIdEl.value = "";
+        if (clientSelectedCompany && String(clientCompanyEl.value || "") === String(clientSelectedCompany || "")) {
+          clientCompanyEl.value = "";
+        }
+        clientSelectedCompany = null;
+      }
+
+      if (clientSuggestTimer) { clearTimeout(clientSuggestTimer); clientSuggestTimer = null; }
+      if (q.length < 2) { hideClientSuggest(); return; }
+      clientSuggestTimer = setTimeout(async () => {
+        const items = await fetchClientSuggest(q);
+        renderClientSuggest(items);
+        // If typed name exactly matches a known client, auto-fill company without forcing a click.
+        maybeAutofillCompanyFromExactMatch(q, items);
+      }, 250);
+    }
+
+    if (clientNameEl) {
+      clientNameEl.addEventListener("input", onClientNameInput);
+      clientNameEl.addEventListener("keydown", onClientNameKeyDown);
+      clientNameEl.addEventListener("focus", () => { /* re-run to show suggestions */ onClientNameInput(); });
+      clientNameEl.addEventListener("blur", () => { setTimeout(hideClientSuggest, 150); });
+    }
+
+    document.addEventListener("mousedown", (e) => {
+      try {
+        if (!modal.contains(e.target)) return;
+        if (clientSuggestBox && !clientSuggestBox.contains(e.target) && e.target !== clientNameEl) hideClientSuggest();
+      } catch (_) {}
+    });
+
     const artistEl = $m("no_artist");
     const assetEl = $m("no_asset");
     const errEl = $m("no_err");
@@ -509,13 +774,24 @@ els.artist.value = "";
         const payload = {
           artist,
           asset_type,
+          status: "draft",
           rep_name: rep_full,
           rep_code,
           client_name,
           client_company_name,
+          client_id: (clientIdEl && clientIdEl.value ? Number(clientIdEl.value) : null),
         };
 
         const url = "/orders/new?initials=" + encodeURIComponent(rep_code);
+
+        // Best-effort: if user typed a new client and didn't pick a suggestion, create it so it appears in autofill next time.
+        if (!payload.client_id && (payload.client_name || "").trim()) {
+          const newId = await ensureClientExists(payload.client_name, payload.client_company_name);
+          if (newId) {
+            payload.client_id = newId;
+            if (clientIdEl) clientIdEl.value = String(newId);
+          }
+        }
 
         const res = await fetch(url, {
           method: "POST",

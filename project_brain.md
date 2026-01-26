@@ -1,92 +1,99 @@
-# Project Brain — BYP Ops / SP Order System
+# BYP Ops — SP Order System — Project Brain (Thread #26 closeout)
 
-Last updated: **2026-01-16** (America/Chicago)
+Last updated: 2026-01-26 (America/Chicago)
 
-## Repo + Local Setup
-- Repo: `BYP-Bassett/BYP_Ops_System`
-- Branch: `fix-delete-override`
-- Local backend root: `C:\BYP_Ops_System\backend`
-- DB (dev): `backend\byp_ops.db` (SQLite)
-- Engine URL: `sqlite:///C:/BYP_Ops_System/backend/byp_ops.db`
-
-### Run
-- API:
-  - `cd C:\BYP_Ops_System\backend`
-  - `.\venv\Scripts\python.exe -m uvicorn app.main:app --reload`
-- Desktop GUI:
-  - `cd C:\BYP_Ops_System\backend`
-  - `python OrderSearchGUI.pyw`
-
-## What Works Now
-
-### Web UI (login-gated)
-- Search/list page: `http://127.0.0.1:8000/`
-- Order detail HTML: `http://127.0.0.1:8000/order/{id}`
-- Order detail JSON: `http://127.0.0.1:8000/orders/{id}`
-- Order detail supports editing **draft-only asset_type** + **notes** + **client name/company** and saving via **Save**.
-- Order detail has **Open Trello Card** button:
-  - Enabled when `trello_card_id` is present.
-  - Uses backend helper endpoint `/trello/card-url/{trello_card_id}` (Trello API resolve).
-- Known: **Back does NOT autosave** (pinned).
-
-### Auth
-- `/login` + cookie sessions (SessionMiddleware)
-- `/me` returns: authenticated, user_id, username, rep_code, rep_name, role, is_active
-- **Inactive users are blocked** and existing sessions are invalidated (hardening implemented).
-
-### Admin
-- Web admin users screen: `/admin/users` (HTML) and `/admin/users?json=1` (JSON)
-- Desktop admin users window exists with parity for core actions (list/add/disable/role/password) and is **admins-only**.
-
-### Finalize + Trello
-- Finalize radio/video with missing Trello linkage auto-creates:
-  - Trello card in rep’s board “To Do”
-  - Checklist on the card
-  - Stores `trello_card_id` + `trello_checklist_id` back on the order
-  - Sets `status=finalized` and `finalized_at`
-- **ART orders do not use SP numbers**.
-  - Trello checklist naming/creation for ART was fixed and verified working.
-
-### Override edit on finalized orders
-- Override-edit workflow now correctly supports “finalize again”:
-  - Old checklist is removed/rebuilt (no duplicate stale checklist)
-  - New checklist id is stored back on the order
-  - Card remains linked
-
-### Audit stamping
-- DB columns exist and are stamped on key routes:
-  - `orders.created_by_user_id`
-  - `orders.updated_by_user_id`
-  - `orders.deleted_by_user_id`
-- Applied on: create, update, finalize, unfinalize, revise, duplicate, additional-version, delete.
-
-### Delete (legacy behavior)
-- DELETE requires initials query param:
-  - `/orders/{id}?initials=SB`
-  - Not JSON body.
-
-## Savepoints / Tags
-- `savepoint-auth-desktop-cookie-2026-01-14`
-- `savepoint-desktop-admin-users-2026-01-15`
-- `savepoint-auth-inactive-kills-session-2026-01-15`
-- `savepoint-art-finalize-trello-checklist-2026-01-15`
-
-## Known Issues / Pinned
-- Web detail page **Back** does not autosave; we agreed to pin (either adults hit Save, or later add “unsaved changes” warning / confirm).
-
-## Guardrails / Non‑Negotiables
+## 0) Canonical Rules (do not violate)
 - One step at a time.
 - No manual file editing.
-- If a file change is needed: user uploads current file → assistant returns **downloadable replacement** with the **exact same filename**.
-- No renaming files. Ever.
+- If a file change is needed: user uploads current file → assistant returns a downloadable replacement with the **exact same filename**.
+- **No renaming files. Ever.**
 - Windows paths only.
 - GUI layout tweaks pinned unless explicitly unpinned.
-- No `${}` inside Python f-strings that embed HTML/JS.
-- PowerShell passwords containing `$` must be in **single quotes**.
+- No `${}` inside Python f-strings embedding HTML/JS (use templates/format safely).
+- PowerShell: passwords with `$` must use single quotes.
+- If a querystring is needed in PS, build the URL string (don’t inline `?override=true`).
+- Route ordering matters (`/orders/search*` must be above `/orders/{id}`).
+- `rg` isn’t installed. Use `Select-String`.
 
-## Next Logical Target (recommended)
-- Add **Admin Orders tools**:
-  - Search/view deleted orders
-  - Undelete (restore) orders
-  - Optional: audit viewer / basic health checks
-  - Optional: “Open Trello card” from admin order view too
+## 1) Repo + branch
+- Repo: https://github.com/BYP-Bassett/BYP_Ops_System.git
+- Branch: `fix-delete-override`
+
+## 2) Confirmed savepoints / tags
+- `savepoint-desktop-restore-2026-01-20`
+- `savepoint-web-save-enabled-on-load-2026-01-21`
+- `savepoint-rep-picker-rules-2026-01-22`
+- `savepoint-client-company-heal-2026-01-23` ✅ (poisoned client company “heal” fix)
+
+## 3) Current Truth (what was working before the latest admin UI changes)
+Auth
+- ✅ Cookie sessions working.
+- ✅ Inactive users get kicked out server-side.
+
+Web UI
+- ✅ `/orders/search2` works.
+- ✅ `/orders/{id}` detail works.
+- ✅ Save button enabled immediately on load (savepoint-web-save-enabled-on-load-2026-01-21).
+- 🧷 Back still doesn’t auto-save (pinned).
+
+Web Admin (before recent breakage)
+- ✅ `/admin/users` works (HTML).
+- ✅ `/admin/users.json` works (authenticated).
+
+Desktop GUI
+- ✅ Desktop loads again (LoginDialog crash fixed earlier).
+- ✅ Deleted Orders restore works (POST `/orders/{id}/restore`, no GET spam/hang). (savepoint-desktop-restore-2026-01-20)
+
+Trello
+- ✅ Finalize creates/ensures checklist correctly.
+- ✅ Art finalize uses art checklist naming (date-based), not SP naming.
+- ✅ Override finalized → edit → finalize again rebuilds checklist properly.
+
+Asset type flip correctness
+- ✅ Art → Radio/Video assigns SP immediately.
+- ✅ Radio/Video → Art clears SP immediately.
+
+## 4) Client/Company typeahead work (web + desktop)
+- Web: client typeahead works on Order page + New Order modal.
+- Web: keyboard navigation added (↑/↓/Enter/Esc), highlight fixed and visible.
+- Desktop: suggestions & keyboard navigation working.
+- Backend: client “poisoned company” healing fixed (existing client row with blank company gets updated when new company provided). Included special case where order snapshotting could overwrite user-entered company. Fixed and saved in savepoint-client-company-heal-2026-01-23.
+
+## 5) Admin UI changes (in-progress) — CURRENTLY BROKEN
+Goal requested:
+- Admin top bar buttons: **Deleted Orders** and **Client/Company list**
+- Client/Company list: fully editable + delete capability, ideally with order-search-style list behavior.
+
+What happened:
+- Multiple iterations modifying `app/main.py` caused drift/regressions.
+- Latest state reported by user:
+  - ❌ Web: **order list** not loading
+  - ❌ Web: **client list** not loading
+  - These failures happened after the latest admin UI changes to `/admin/clients` and related JSON/data loading.
+- Verified at one point:
+  - `RUNNING: C:\BYP_Ops_System\backend\app\main.py`
+  - `HAS /admin/clients: True`
+- A prior check attempt failed due to incorrect import path `app.db.models` (actual models module differs).
+
+## 6) How to start server + GUI
+API
+- `cd C:\BYP_Ops_System\backend`
+- `.[0m\venv\Scripts\python.exe -m uvicorn app.main:app --reload`
+
+Desktop GUI
+- `cd C:\BYP_Ops_System\backend`
+- `python OrderSearchGUI.pyw`
+
+Optional compile checks (Python only)
+- `python -m py_compile .\app\routes\orders.py`
+- `python -m py_compile .\app\main.py`
+- `python -m py_compile .\OrderSearchGUI.pyw`
+
+## 7) Next Single Target (Thread #27 starting point)
+Restore web functionality after admin UI changes:
+- Fix web **order list** loading regression.
+- Fix web **client list** loading regression.
+Likely scope:
+- `C:\BYP_Ops_System\backend\app\main.py` (admin HTML + JS injection + JSON endpoints)
+Possibly:
+- `C:\BYP_Ops_System\backend\app\routes\orders.py` (if include_deleted or data endpoints need alignment)

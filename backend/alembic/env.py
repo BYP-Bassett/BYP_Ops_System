@@ -29,6 +29,7 @@ from app.models import orders  # noqa: F401
 from app.models import sp_master  # noqa: F401
 from app.models import audit_log  # noqa: F401
 from app.models import users  # noqa: F401
+from app.models import clients  # noqa: F401
 
 
 def get_url():
