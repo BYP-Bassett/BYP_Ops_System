@@ -1,4 +1,14 @@
+
 from __future__ import annotations
+
+def _username_from_session(request):
+    # Central helper so admin pages don't crash when we refactor session handling.
+    try:
+        sess = getattr(request, "session", None) or {}
+        return sess.get("username") or ""
+    except Exception:
+        return ""
+
 
 import os
 import hmac
@@ -106,7 +116,6 @@ async def _auth_session_guard(request: Request, call_next):
     if (
         path.startswith("/login")
         or path.startswith("/web")
-        or path.startswith("/static")
         or path in ("/health", "/favicon.ico")
     ):
         return await call_next(request)
@@ -701,7 +710,7 @@ def admin_clients_page(request: Request, msg: str | None = None, err: str | None
     if gate is not None:
         return gate
 
-    username = (request.session.get("username") or "admin")
+    username = (_username_from_session(request) or request.session.get('username') or 'admin')
 
     # Bootstrap initial data server-side so the page never appears blank.
     db = SessionLocal()
@@ -736,7 +745,7 @@ def admin_clients_page(request: Request, msg: str | None = None, err: str | None
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>BYP Ops — Admin Clients</title>
   <style>
-    body { font-family: Arial, sans-serif; margin: 16px; font-size: 14px; font-weight: normal; }
+    body { font-family: Arial, sans-serif; margin: 16px; }
     .topbar { display:flex; gap:10px; align-items:center; margin-bottom:12px; flex-wrap:wrap; }
     .btnlink { display:inline-block; padding:6px 10px; border:1px solid #999; border-radius:6px; text-decoration:none; color:#000; background:#f3f3f3; }
     .btnlink:hover { background:#e9e9e9; }
@@ -749,11 +758,11 @@ def admin_clients_page(request: Request, msg: str | None = None, err: str | None
     .listHeader input { flex: 1; padding:8px; border:1px solid #ccc; border-radius:8px; }
     .listHeader button { padding:8px 10px; border:1px solid #999; border-radius:8px; background:#f3f3f3; cursor:pointer; }
     .rows { max-height: 70vh; overflow:auto; }
-    .row { display:grid; grid-template-columns: 70px 1fr 1fr; gap:10px; padding:6px 10px; border-bottom:1px solid #f0f0f0; cursor:pointer; font-size: 13px; line-height: 1.2; align-items: center; }
+    .row { display:grid; grid-template-columns: 60px 1fr 1fr; gap:8px; padding:4px 8px; border-bottom:1px solid #f0f0f0; cursor:pointer; align-items:center; line-height:1.1; }
     .row:hover { background:#f7f7f7; }
     .row.sel { background:#dbeafe; }
     .cid { color:#666; font-size:12px; }
-    .cname { font-weight: normal; }
+    .cname { font-weight: 400; }
     .comp { color:#333; }
     .panel { border:1px solid #ddd; border-radius:12px; padding:12px; }
     .panel h2 { margin:0 0 10px 0; font-size:16px; }
@@ -765,19 +774,7 @@ def admin_clients_page(request: Request, msg: str | None = None, err: str | None
     .ctx { position:fixed; display:none; z-index:9999; background:#fff; border:1px solid #ccc; border-radius:10px; overflow:hidden; box-shadow:0 10px 28px rgba(0,0,0,0.15); }
     .ctx button { width:100%; border:0; background:#fff; padding:10px 12px; text-align:left; cursor:pointer; }
     .ctx button:hover { background:#f5f5f5; }
-  
-/* Tighten client list row height */
-#clientsTable th, #clientsTable td {
-  padding-top: 2px !important;
-  padding-bottom: 2px !important;
-  line-height: 1.05 !important;
-}
-#clientsTable input[type="text"] {
-  padding-top: 2px !important;
-  padding-bottom: 2px !important;
-  line-height: 1.05 !important;
-}
-</style>
+  </style>
 </head>
 <body>
   <div class="topbar">
@@ -1204,6 +1201,81 @@ def admin_clients_toggle(request: Request, client_id: int):
     return RedirectResponse(url="/admin/clients?msg=" + urllib.parse.quote("Updated."), status_code=303)
 
 
+
+
+@app.post("/admin/clients/delete", include_in_schema=False)
+async def admin_clients_delete(request: Request):
+    gate = _require_admin_or_redirect(request)
+    if gate is not None:
+        # fetch() callers need JSON, not HTML redirects.
+        try:
+            from starlette.responses import RedirectResponse as _RR
+            if isinstance(gate, _RR):
+                return JSONResponse(content={"detail": "Not authenticated"}, status_code=401)
+        except Exception:
+            pass
+        return gate
+
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+
+    ids_raw = payload.get("ids") if isinstance(payload, dict) else None
+    if not isinstance(ids_raw, list):
+        return JSONResponse(content={"detail": "Expected JSON body: { ids: [...] }"}, status_code=400)
+
+    # Normalize to ints where possible
+    ids = []
+    for v in ids_raw:
+        try:
+            ids.append(int(v))
+        except Exception:
+            pass
+
+    if not ids:
+        return JSONResponse(content={"deleted": [], "blocked": [], "not_found": []})
+
+    db = SessionLocal()
+    try:
+        clients = db.query(Client).filter(Client.id.in_(ids)).all()
+        found_ids = set(int(getattr(c, "id")) for c in clients)
+        not_found = [i for i in ids if i not in found_ids]
+
+        deleted = []
+        blocked = []
+
+        # Orders store client_name / client_company_name as text; block deletion if any FINALIZED order references the client_name.
+        status_col = getattr(Order, "status", None)
+        client_name_col = getattr(Order, "client_name", None)
+
+        for c in clients:
+            cid = int(getattr(c, "id"))
+            cname = str(getattr(c, "client_name") or "").strip()
+
+            is_blocked = False
+            try:
+                if status_col is not None and client_name_col is not None and cname:
+                    q = db.query(Order).filter(status_col == "finalized", client_name_col == cname)
+                    is_blocked = q.count() > 0
+            except Exception:
+                is_blocked = False
+
+            if is_blocked:
+                blocked.append({"id": cid, "client_name": cname})
+                continue
+
+            try:
+                db.delete(c)
+                deleted.append(cid)
+            except Exception:
+                blocked.append({"id": cid, "client_name": cname})
+
+        db.commit()
+        return JSONResponse(content={"deleted": deleted, "blocked": blocked, "not_found": not_found})
+    finally:
+        db.close()
+
 # ---- Admin: Deleted Orders (web) ----
 @app.get("/admin/deleted-orders", include_in_schema=False)
 def admin_deleted_orders_page(request: Request, msg: str | None = None, err: str | None = None):
@@ -1351,69 +1423,6 @@ def admin_deleted_orders_page(request: Request, msg: str | None = None, err: str
     return HTMLResponse(content=html)
 
 
-@app.post("/admin/clients/delete", include_in_schema=False)
-async def admin_clients_delete(request: Request):
-    gate = _require_admin_or_redirect(request)
-    if gate is not None:
-        return gate
-
-    try:
-        data = await request.json()
-    except Exception:
-        data = {}
-
-    ids = data.get("ids") or []
-    # normalize ids to ints where possible
-    norm_ids: list[int] = []
-    for x in ids:
-        try:
-            norm_ids.append(int(str(x)))
-        except Exception:
-            continue
-
-    deleted: list[int] = []
-    not_found: list[int] = []
-    blocked: list[dict] = []
-
-    db = SessionLocal()
-    try:
-        for cid in norm_ids:
-            c = db.query(Client).filter(Client.id == cid).first()
-            if not c:
-                not_found.append(cid)
-                continue
-
-            # Block deletion if any finalized orders reference this client_name
-            try:
-                cname = str(getattr(c, "client_name") or "")
-                if cname:
-                    q = db.query(Order).filter(
-                        Order.client_name == cname,
-                        Order.status == "finalized",
-                        Order.is_deleted == False,  # noqa: E712
-                    )
-                    if q.count() > 0:
-                        blocked.append({"id": cid, "client_name": cname})
-                        continue
-            except Exception:
-                # If we can't verify, be conservative and block
-                blocked.append({"id": cid, "client_name": str(getattr(c, "client_name") or "")})
-                continue
-
-            db.delete(c)
-            deleted.append(cid)
-
-        db.commit()
-    except Exception as e:
-        db.rollback()
-        return JSONResponse({"error": str(e)}, status_code=500)
-    finally:
-        db.close()
-
-    return JSONResponse({"deleted": deleted, "blocked": blocked, "not_found": not_found})
-
-
-
 @app.post("/admin/deleted-orders/{order_id}/restore", include_in_schema=False)
 def admin_deleted_orders_restore(request: Request, order_id: int):
     gate = _require_admin_or_redirect(request)
@@ -1465,10 +1474,82 @@ WEB_DIR = APP_DIR / "web"
 # Serve static assets (JS/CSS) from /web/*
 # Example: /web/app.js
 app.mount("/web", StaticFiles(directory=WEB_DIR), name="web")
-# Back-compat: older web builds referenced /static/* for assets.
-app.mount("/static", StaticFiles(directory=WEB_DIR), name="static")
 
 
+
+
+# ---- Admin-only Order JSON (includes deleted) ----
+@app.get("/orders_admin/{order_id}", include_in_schema=False)
+def orders_admin_detail(request: Request, order_id: int):
+    gate = _require_admin_or_redirect(request)
+    if gate is not None:
+        # JS fetch callers need JSON, not HTML redirects.
+        try:
+            from starlette.responses import RedirectResponse as _RR
+            if isinstance(gate, _RR):
+                return JSONResponse(content={"detail": "Not authenticated"}, status_code=401)
+        except Exception:
+            pass
+        return gate
+
+    def _dt(x):
+        try:
+            return x.isoformat() if x else None
+        except Exception:
+            return None
+
+    def _safe(obj, name):
+        try:
+            return getattr(obj, name)
+        except Exception:
+            return None
+
+    db = SessionLocal()
+    try:
+        o = db.query(Order).filter(Order.id == order_id).first()
+        if not o:
+            return JSONResponse(content={"detail": "Order not found"}, status_code=404)
+
+        # Try to resolve SP info if relationship exists.
+        sp_obj = _safe(o, "sp")
+        sp_number = _safe(sp_obj, "sp_number") or _safe(o, "sp_number")
+        sp_order_type = _safe(sp_obj, "order_type") or _safe(o, "sp_order_type") or _safe(o, "order_type")
+        sp_revision_of = _safe(sp_obj, "revision_of") or _safe(o, "sp_revision_of") or _safe(o, "revision_of")
+        additional_version_of = _safe(sp_obj, "additional_version_of") or _safe(o, "additional_version_of")
+
+        payload = {
+            "id": _safe(o, "id"),
+            "artist": _safe(o, "artist"),
+            "asset_type": _safe(o, "asset_type"),
+            "notes": _safe(o, "notes"),
+            "status": _safe(o, "status"),
+            "created_at": _dt(_safe(o, "created_at")),
+            "updated_at": _dt(_safe(o, "updated_at")),
+            "finalized_at": _dt(_safe(o, "finalized_at")),
+            "trello_card_id": _safe(o, "trello_card_id"),
+            "is_deleted": bool(_safe(o, "is_deleted")),
+            "deleted_at": _dt(_safe(o, "deleted_at")),
+            "deleted_by": _safe(o, "deleted_by"),
+            "client_name": _safe(o, "client_name"),
+            "client_company_name": _safe(o, "client_company_name"),
+            "client_email": _safe(o, "client_email"),
+            "client_phone": _safe(o, "client_phone"),
+            "parent_display": _safe(o, "parent_display"),
+
+            # SP fields expected by the web order page
+            "sp_number": sp_number,
+            "sp_order_type": sp_order_type,
+            "sp_revision_of": sp_revision_of,
+            "additional_version_of": additional_version_of,
+
+            # legacy-ish fields the UI may reference
+            "sp": sp_number,
+            "order_type": sp_order_type,
+            "revision_of": sp_revision_of,
+        }
+        return JSONResponse(content=payload)
+    finally:
+        db.close()
 @app.get("/", include_in_schema=False)
 def web_root(request: Request):
     # If not logged in, send to login.
@@ -2259,11 +2340,23 @@ var orderRows = document.getElementById("orderRows");
       }
 
       if (deleteBtn) deleteBtn.addEventListener("click", doDelete);
+function fetchOrder() {
+        return fetch("/orders/" + ORDER_ID, { credentials: "same-origin" })
+          .then(function(res) {
+            if (res.ok) return res;
+            if (res.status === 404) {
+              // Deleted orders: normal API hides them. Admin page needs a fallback.
+              return fetch("/orders_admin/" + ORDER_ID, { credentials: "same-origin" });
+            }
+            return res;
+          });
+      }
+
 function load() {
         clearMsgs();
         setBusy("Fetching…");
 
-        fetch("/orders/" + ORDER_ID, { credentials: "same-origin" })
+        fetchOrder()
           .then(function(res) {
             return res.text().then(function(text) {
               if (!res.ok) {
