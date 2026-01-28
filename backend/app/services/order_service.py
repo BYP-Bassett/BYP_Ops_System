@@ -84,22 +84,20 @@ def _env_board_id_for_rep(rep_code: str | None) -> str:
 
 def _build_card_desc(order: Order, sp_number: str | None) -> str:
     """
-    Minimal, human-friendly description. You can evolve this later.
+    Trello card description.
+
+    Requirement:
+      - Description should be the client name only (not a full order dump).
+      - If client_name is blank, fall back to company_name.
     """
-    lines: list[str] = []
-    lines.append(f"Order ID: {order.id}")
-    lines.append(f"Asset: {order.asset_type}")
-    if sp_number:
-        lines.append(f"SP: {sp_number}")
-    if getattr(order, "client_name", None):
-        lines.append(f"Client: {order.client_name}")
-    if getattr(order, "client_company_name", None):
-        lines.append(f"Company: {order.client_company_name}")
-    if getattr(order, "notes", None):
-        lines.append("")
-        lines.append("Notes:")
-        lines.append(order.notes)
-    return "\n".join(lines).strip()
+    client = (getattr(order, "client_name", None) or "").strip()
+    company = (getattr(order, "client_company_name", None) or "").strip()
+
+    if client:
+        return client
+    if company:
+        return company
+    return ""
 
 def _notes_to_items_local(notes: str | None) -> list[str]:
     items: list[str] = []

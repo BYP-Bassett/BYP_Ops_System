@@ -31,6 +31,10 @@
 
   let offset = 0;
   let total = 0;
+  
+  // Row selection (for highlight + safe delete)
+  let selectedOrderId = null;
+  let selectedRowEl = null;
 
   const $ = (id) => {
     if (!id) return null;
@@ -82,6 +86,45 @@
     rows: $("rows"),
   };
 
+  // Users should not see deleted items from Search.
+  (function hideIncludeDeleted(){
+    try{
+      if (!els.include_deleted) return;
+      els.include_deleted.checked = false;
+      // Hide checkbox and any nearby label text
+      const wrap = els.include_deleted.closest("label") || els.include_deleted.parentElement;
+      if (wrap) wrap.style.display = "none";
+      else els.include_deleted.style.display = "none";
+    } catch (_) {}
+  })();
+
+
+  // Visual cues for selection + delete button
+  (function injectSearchStyles(){
+    try{
+      if (document.getElementById("searchDeleteStyles")) return;
+      const st = document.createElement("style");
+      st.id = "searchDeleteStyles";
+      st.textContent = `
+        tr.clickrow{ cursor: default; }
+        tr.clickrow.row-selected{ outline: 2px solid currentColor; outline-offset: -2px; }
+        tr.clickrow.row-selected td{ font-weight: 600; }
+        button.btn-delete{
+          border: 1px solid currentColor;
+          padding: 2px 8px;
+          border-radius: 6px;
+          background: transparent;
+          cursor: pointer;
+        }
+        button.btn-delete:hover{ filter: brightness(0.9); }
+        button.btn-delete:disabled{ opacity: .5; cursor: not-allowed; }
+        /* red delete (without assuming any global CSS vars) */
+        button.btn-delete{ color: #b00020; border-color: #b00020; }
+      `;
+      document.head.appendChild(st);
+    }catch(_e){}
+  })();
+
   const val = (el) => {
     try { return el ? String(el.value ?? "") : ""; } catch (_) { return ""; }
   };
@@ -110,7 +153,7 @@
         status: val(els.status),
         rep_code: val(els.rep_code),
         sp_number: val(els.sp_number),
-        include_deleted: isChecked(els.include_deleted),
+        include_deleted: false,
       };
       sessionStorage.setItem(STATE_KEY, JSON.stringify(state));
     } catch (_) {
@@ -133,7 +176,7 @@
       setVal(els.status, state.status ?? "");
       setVal(els.rep_code, state.rep_code ?? "");
       setVal(els.sp_number, state.sp_number ?? "");
-      setChecked(els.include_deleted, !!state.include_deleted);
+      setChecked(els.include_deleted, false);
 
       offset = Number(state.offset ?? 0) || 0;
       if (offset < 0) offset = 0;
@@ -174,9 +217,8 @@ add("asset_type", val(els.asset_type));
 
     p.set("limit", String(PAGE_SIZE));
     p.set("offset", String(offset));
-    p.set("include_deleted", els.include_deleted.checked ? "true" : "false");
-
-    return p.toString();
+    p.set("include_deleted", "false");
+return p.toString();
   }
 
   function setPagerButtons() {
@@ -186,6 +228,8 @@ add("asset_type", val(els.asset_type));
 
   function clearTable() {
     if (els.rows) els.rows.innerHTML = "";
+    selectedOrderId = null;
+    selectedRowEl = null;
   }
 
   function setTableHeaders() {
@@ -202,7 +246,8 @@ add("asset_type", val(els.asset_type));
         "<th class=\"nowrap\">Revision Of</th>" +
         "<th class=\"nowrap\">Add'l Vers Of</th>" +
         "<th>Artist</th>" +
-        "<th>Notes</th>";
+        "<th>Notes</th>" +
+        "<th class=\"nowrap\">Actions</th>";
     } catch (_) {
       // ignore
     }
@@ -212,6 +257,90 @@ add("asset_type", val(els.asset_type));
   function openDetail(id) {
     saveState();
     window.location.href = `/order/${encodeURIComponent(id)}`;
+  }
+
+
+  function selectRow(tr, id) {
+    try {
+      if (selectedRowEl && selectedRowEl !== tr) selectedRowEl.classList.remove("row-selected");
+      selectedRowEl = tr;
+      selectedOrderId = id;
+      if (selectedRowEl) selectedRowEl.classList.add("row-selected");
+    } catch (_e) {}
+  }
+
+  async function softDeleteOrder(orderId, initials, force) {
+    const id = Number(orderId);
+    if (!id) throw new Error("Bad order id");
+
+    const params = new URLSearchParams();
+    if (initials) params.set("initials", initials);
+    if (force) params.set("force", "true");
+    const qs = params.toString() ? ("?" + params.toString()) : "";
+
+    // Try a few known patterns without needing another code change.
+
+    const attempts = [
+      { url: `/orders/${encodeURIComponent(id)}/delete${qs}`, method: "POST" },
+      { url: `/orders/${encodeURIComponent(id)}/delete${qs}`, method: "DELETE" },
+      { url: `/orders/${encodeURIComponent(id)}${qs}`, method: "DELETE" },
+      { url: `/orders/${encodeURIComponent(id)}/soft-delete${qs}`, method: "POST" },
+      { url: `/orders/${encodeURIComponent(id)}/soft_delete${qs}`, method: "POST" },
+    ];
+
+    let lastText = "";
+    for (const a of attempts) {
+      try {
+        const res = await fetch(a.url, { method: a.method, credentials: "same-origin", headers: { "Accept": "application/json" } });
+        if (res.ok) return true;
+        // If auth kicked us, bounce to login.
+        if (res.status === 401 || res.status === 403) {
+          window.location.href = "/login";
+          return false;
+        }
+        lastText = await res.text();
+        // Only keep trying if it's a likely "wrong endpoint/method".
+        if (res.status === 404 || res.status === 405) continue;
+        throw new Error(`HTTP ${res.status}: ${lastText || "Delete failed"}`);
+      } catch (e) {
+        // Network error, stop early.
+        if (String(e && e.message || "").startsWith("HTTP ")) throw e;
+      }
+    }
+    throw new Error(lastText ? lastText : "Delete failed (no matching endpoint)");
+  }
+
+  async function onDeleteFromList(orderId, label) {
+    const id = Number(orderId);
+    if (!id) return;
+    const pretty = label ? String(label).trim() : "";
+    const msg = pretty ? `Delete order ${id} (${pretty})?` : `Delete order ${id}?`;
+    if (!confirm(msg + "\n\nThis will move it to Deleted Orders.")) return;
+
+    try {
+      if (els.error) els.error.textContent = "";
+      const initials = await getActionInitials();
+      if (!initials) throw new Error('Missing initials');
+
+      try {
+        await softDeleteOrder(id, initials, false);
+      } catch (err) {
+        const emsg = String((err && err.message) ? err.message : err);
+        const needsForce = emsg.includes("order is finalized") && emsg.includes("force=true");
+        if (!needsForce) throw err;
+
+        if (!confirm("This order is FINALIZED.\n\nDelete anyway? (This requires force=true)")) {
+          return;
+        }
+        await softDeleteOrder(id, initials, true);
+      }
+
+      // Re-run current search to refresh list
+      await runSearch(false);
+    } catch (e) {
+      console.error(e);
+      if (els.error) els.error.textContent = "Delete failed: " + (e && e.message ? e.message : String(e));
+    }
   }
 
   function render(items) {
@@ -232,10 +361,35 @@ add("asset_type", val(els.asset_type));
         "<td>" + esc(o.artist) + "</td>" +
         "<td>" + esc(o.notes) + "</td>";
 
-      tr.addEventListener("click", () => openDetail(o.id));
+      tr.addEventListener("click", () => selectRow(tr, o.id));
+      tr.addEventListener("dblclick", () => openDetail(o.id));
       tr.addEventListener("keydown", (e) => {
         if (e.key === "Enter") openDetail(o.id);
+        if (e.key === "Delete") { e.preventDefault(); onDeleteFromList(o.id, o.artist); }
       });
+
+
+      // Actions: Delete (soft-delete to Deleted Orders)
+      try {
+        const tdA = document.createElement("td");
+        tdA.className = "nowrap";
+        const delBtn = document.createElement("button");
+        delBtn.type = "button";
+        delBtn.className = "btn-delete";
+        const alreadyDeleted = !!(o && (o.is_deleted || o.deleted_at || o.deleted_by));
+        delBtn.textContent = alreadyDeleted ? "Deleted" : "Delete";
+        delBtn.disabled = alreadyDeleted;
+        delBtn.title = alreadyDeleted ? "Already deleted" : "Move to Deleted Orders";
+        delBtn.addEventListener("click", (e) => {
+          e.stopPropagation();
+          selectRow(tr, o.id);
+          onDeleteFromList(o.id, o.artist);
+        });
+        tdA.appendChild(delBtn);
+        tr.appendChild(tdA);
+      } catch (_e) {
+        // ignore
+      }
 
       if (els.rows) els.rows.appendChild(tr);
     }
@@ -912,6 +1066,37 @@ createBtn.addEventListener("click", create);
       return null;
     }
   }
+
+  async function getActionInitials() {
+    // Many endpoints require ?initials=XX (rep_code). Pull from /me, fall back to cached UI value, then prompt.
+    let me = null;
+    try { me = await fetchMe(); } catch (_) { me = null; }
+
+    const candidates = [
+      me && (me.initials || me.rep_code || me.repCode || me.code),
+      (typeof BYPOps !== "undefined" && BYPOps && (BYPOps.rep_code || BYPOps.initials)) ? (BYPOps.rep_code || BYPOps.initials) : null,
+    ];
+
+    let initials = null;
+    for (const c of candidates) {
+      if (typeof c === "string" && c.trim()) { initials = c.trim(); break; }
+    }
+
+    if (!initials) {
+      initials = (localStorage.getItem("bypops_initials") || "").trim();
+    }
+
+    if (!initials) {
+      const typed = prompt("Enter your initials (rep code), e.g. SB", "SB");
+      if (typed && String(typed).trim()) {
+        initials = String(typed).trim();
+        try { localStorage.setItem("bypops_initials", initials); } catch (_) {}
+      }
+    }
+
+    return initials;
+  }
+
 
   function clearFilters() {
     // Text inputs
