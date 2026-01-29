@@ -26,6 +26,9 @@
       return null;
     }
   }
+  // Expose for inline order page script
+  window.ensureClientExists = ensureClientExists;
+
 
   const PAGE_SIZE = 50; // change later when you decide defaults
 

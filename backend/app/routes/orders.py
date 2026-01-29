@@ -708,6 +708,15 @@ def create_order(
     session_user: dict = Depends(require_login),
     initials: str | None = Query(default=None, description="Your initials for audit log (optional)."),
 ):
+    # Notes/instructions compatibility: accept Notes sent as "instructions" from older UIs.
+    try:
+        if getattr(payload, "notes", None) is None and getattr(payload, "instructions", None) is not None:
+            payload.notes = payload.instructions  # type: ignore[attr-defined]
+        if getattr(payload, "instructions", None) is None and getattr(payload, "notes", None) is not None:
+            payload.instructions = payload.notes  # type: ignore[attr-defined]
+    except Exception:
+        pass
+
     # Auto-prepend default boilerplate for NEW radio/video orders (art excluded).
     default_notes = _default_notes_for_new_order(payload.asset_type, getattr(payload, "notes", None))
     if default_notes is not None:
@@ -1422,6 +1431,14 @@ def update_order(
         touched_fields.append("rep_name")
 
 # Apply allowed field updates (only if provided)
+    # Notes/instructions compatibility: some UIs still use "instructions" as the Notes field.
+    incoming_notes = getattr(payload, "notes", None)
+    incoming_instructions = getattr(payload, "instructions", None)
+    if incoming_notes is None and incoming_instructions is not None:
+        incoming_notes = incoming_instructions
+    if incoming_instructions is None and incoming_notes is not None:
+        incoming_instructions = incoming_notes
+
     for field in [
         "artist",
         "notes",
@@ -1435,7 +1452,12 @@ def update_order(
         "parent_order_id",
         "revision_of",
     ]:
-        val = getattr(payload, field, None)
+        if field == "notes":
+            val = incoming_notes
+        elif field == "instructions":
+            val = incoming_instructions
+        else:
+            val = getattr(payload, field, None)
         if val is not None:
             setattr(order, field, val)
             touched_fields.append(field)

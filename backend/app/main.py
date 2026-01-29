@@ -2138,10 +2138,29 @@ var orderRows = document.getElementById("orderRows");
 
         var p = Promise.resolve(null);
         if ((d.client_id === null) && ((d.client_name || "").trim() !== "")) {
-          p = ensureClientExists(d.client_name, d.client_company_name);
+          var nm = (d.client_name || "").trim();
+          var co = (d.client_company_name || "").trim();
+
+          p = fetch("/orders/clients", {
+            method: "POST",
+            credentials: "same-origin",
+            headers: { "Content-Type": "application/json", "Accept": "application/json" },
+            body: JSON.stringify({ client_name: nm, company_name: co })
+          })
+          .then(function(res) {
+            if (!res.ok) return res.text().then(function(t){ throw new Error(t || "client create failed"); });
+            return res.json();
+          })
+          .then(function(j) {
+            return (j && j.id) ? j.id : null;
+          })
+          .catch(function() {
+            // Don't block saving the order if the client create fails.
+            return null;
+          });
         }
 
-        return p.then(function(newId) {
+return p.then(function(newId) {
           if (newId) payload.client_id = newId;
           return fetch("/orders/" + ORDER_ID, {
           credentials: "same-origin",
