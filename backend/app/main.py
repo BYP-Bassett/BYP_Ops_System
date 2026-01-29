@@ -10,6 +10,26 @@ def _username_from_session(request):
         return ""
 
 
+
+def get_current_user_from_session(request):
+    """Minimal session user helper: returns dict-ish session info or None."""
+    try:
+        sess = getattr(request, "session", None) or {}
+        uid = sess.get("user_id")
+        if uid is None:
+            return None
+        return {
+            "user_id": uid,
+            "username": sess.get("username") or "",
+            "role": sess.get("role") or "user",
+            "rep_code": sess.get("rep_code") or "",
+            "rep_name": sess.get("rep_name") or "",
+            "is_active": sess.get("is_active"),
+        }
+    except Exception:
+        return None
+
+
 import os
 import hmac
 import hashlib
@@ -50,6 +70,84 @@ app.add_middleware(
     same_site="lax",
     https_only=False,  # local dev
 )
+
+
+# ---- Local dev service env loader ----
+# Trello creds live in app/services/.env (per project convention). We load it on-demand
+# for routes that need Trello (e.g., Open Trello Card), because main.py doesn't otherwise
+# read that file.
+_SERVICE_ENV_LOADED = False
+
+def _load_service_env() -> None:
+    global _SERVICE_ENV_LOADED
+    if _SERVICE_ENV_LOADED:
+        return
+
+    try:
+        base_dir = Path(__file__).resolve().parent
+        env_path = base_dir / "services" / ".env"
+        if not env_path.exists():
+            _SERVICE_ENV_LOADED = True
+            return
+
+        for raw_line in env_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            k = k.strip()
+            v = v.strip().strip('"').strip("'")
+            if not k:
+                continue
+            # Only set if missing; system env wins.
+            if os.environ.get(k) is None:
+                os.environ[k] = v
+    finally:
+        _SERVICE_ENV_LOADED = True
+
+
+
+def _get_trello_key_token() -> tuple[str | None, str | None]:
+    """
+    Return (key, token) for Trello API calls.
+
+    Canonical env names:
+      - TRELLO_KEY
+      - TRELLO_TOKEN
+
+    Accepted alternates:
+      - TRELLO_API_KEY
+      - TRELLO_API_TOKEN
+      - TRELLO_AUTH_TOKEN
+    """
+    _load_service_env()
+
+    key_candidates = ["TRELLO_KEY", "TRELLO_API_KEY"]
+    token_candidates = ["TRELLO_TOKEN", "TRELLO_API_TOKEN", "TRELLO_AUTH_TOKEN"]
+
+    key = None
+    for k in key_candidates:
+        v = os.environ.get(k)
+        if v:
+            key = v.strip()
+            break
+
+    token = None
+    for k in token_candidates:
+        v = os.environ.get(k)
+        if v:
+            token = v.strip()
+            break
+
+    # Map alternates into canonical vars for consistency elsewhere.
+    if key and not os.environ.get("TRELLO_KEY"):
+        os.environ["TRELLO_KEY"] = key
+    if token and not os.environ.get("TRELLO_TOKEN"):
+        os.environ["TRELLO_TOKEN"] = token
+
+    return key, token
 
 
 def _pbkdf2_sha256(password: str, salt_b64: str, iterations: int) -> str:
@@ -180,10 +278,13 @@ def trello_card_url(card_id: str, request: Request):
     if not user:
         raise HTTPException(status_code=401, detail="Not authenticated")
 
-    key = os.environ.get("TRELLO_KEY")
-    token = os.environ.get("TRELLO_TOKEN")
+    key, token = _get_trello_key_token()
     if not key or not token:
-        raise HTTPException(status_code=500, detail="Trello not configured (missing TRELLO_KEY/TRELLO_TOKEN)")
+        present = [k for k in ("TRELLO_KEY","TRELLO_TOKEN","TRELLO_API_KEY","TRELLO_API_TOKEN","TRELLO_AUTH_TOKEN") if os.environ.get(k)]
+        raise HTTPException(
+            status_code=500,
+            detail="Trello not configured (missing key/token). Found env vars: " + (", ".join(present) if present else "(none)"),
+        )
 
     # Use Trello API to get a real usable URL (shortUrl is best).
     params = {
@@ -2138,29 +2239,25 @@ var orderRows = document.getElementById("orderRows");
 
         var p = Promise.resolve(null);
         if ((d.client_id === null) && ((d.client_name || "").trim() !== "")) {
-          var nm = (d.client_name || "").trim();
-          var co = (d.client_company_name || "").trim();
+          var _nm = (d.client_name || "").trim();
+          var _co = (d.client_company_name || "").trim();
 
           p = fetch("/orders/clients", {
             method: "POST",
             credentials: "same-origin",
             headers: { "Content-Type": "application/json", "Accept": "application/json" },
-            body: JSON.stringify({ client_name: nm, company_name: co })
+            body: JSON.stringify({
+              client_name: _nm,
+              company_name: _co || null,
+              is_active: true
+            })
           })
-          .then(function(res) {
-            if (!res.ok) return res.text().then(function(t){ throw new Error(t || "client create failed"); });
-            return res.json();
-          })
-          .then(function(j) {
-            return (j && j.id) ? j.id : null;
-          })
-          .catch(function() {
-            // Don't block saving the order if the client create fails.
-            return null;
-          });
+          .then(function(res) { if (!res.ok) return null; return res.json(); })
+          .then(function(data) { return (data && data.id != null) ? data.id : null; })
+          .catch(function(_e) { return null; });
         }
 
-return p.then(function(newId) {
+        return p.then(function(newId) {
           if (newId) payload.client_id = newId;
           return fetch("/orders/" + ORDER_ID, {
           credentials: "same-origin",
