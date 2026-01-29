@@ -11,23 +11,56 @@ def _username_from_session(request):
 
 
 
-def get_current_user_from_session(request):
-    """Minimal session user helper: returns dict-ish session info or None."""
+def get_current_user_from_session(request: Request) -> str:
+    """Return username from session, or empty string if not logged in."""
     try:
-        sess = getattr(request, "session", None) or {}
-        uid = sess.get("user_id")
-        if uid is None:
-            return None
-        return {
-            "user_id": uid,
-            "username": sess.get("username") or "",
-            "role": sess.get("role") or "user",
-            "rep_code": sess.get("rep_code") or "",
-            "rep_name": sess.get("rep_name") or "",
-            "is_active": sess.get("is_active"),
-        }
+        return _username_from_session(request)
     except Exception:
-        return None
+        return ""
+
+def _load_service_env() -> None:
+    """Best-effort load of app/services/.env into os.environ for local dev."""
+    try:
+        # Resolve relative to this file location on disk
+        base_dir = Path(__file__).resolve().parent  # app/
+        env_path = base_dir / "services" / ".env"
+        if not env_path.exists():
+            return
+        for line in env_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+            s = line.strip()
+            if not s or s.startswith("#") or "=" not in s:
+                continue
+            k, v = s.split("=", 1)
+            k = k.strip()
+            v = v.strip().strip('"').strip("'")
+            if not k:
+                continue
+            # Don't override explicitly-set environment variables.
+            if os.environ.get(k) is None:
+                os.environ[k] = v
+    except Exception:
+        # Never crash the app over env loading.
+        return
+
+def _get_trello_key_token() -> tuple[str | None, str | None]:
+    """Return (key, token) for Trello calls, accepting legacy env var names."""
+    _load_service_env()
+
+    key = (os.environ.get("TRELLO_KEY") or os.environ.get("TRELLO_API_KEY") or "").strip() or None
+    token = (
+        os.environ.get("TRELLO_TOKEN")
+        or os.environ.get("TRELLO_API_TOKEN")
+        or os.environ.get("TRELLO_AUTH_TOKEN")
+        or ""
+    ).strip() or None
+
+    # Map alternates into canonical vars for consistency.
+    if key and not os.environ.get("TRELLO_KEY"):
+        os.environ["TRELLO_KEY"] = key
+    if token and not os.environ.get("TRELLO_TOKEN"):
+        os.environ["TRELLO_TOKEN"] = token
+
+    return key, token
 
 
 import os
@@ -39,7 +72,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-from fastapi import FastAPI, Form, Request
+from fastapi import FastAPI, Form, Request, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
@@ -70,84 +103,6 @@ app.add_middleware(
     same_site="lax",
     https_only=False,  # local dev
 )
-
-
-# ---- Local dev service env loader ----
-# Trello creds live in app/services/.env (per project convention). We load it on-demand
-# for routes that need Trello (e.g., Open Trello Card), because main.py doesn't otherwise
-# read that file.
-_SERVICE_ENV_LOADED = False
-
-def _load_service_env() -> None:
-    global _SERVICE_ENV_LOADED
-    if _SERVICE_ENV_LOADED:
-        return
-
-    try:
-        base_dir = Path(__file__).resolve().parent
-        env_path = base_dir / "services" / ".env"
-        if not env_path.exists():
-            _SERVICE_ENV_LOADED = True
-            return
-
-        for raw_line in env_path.read_text(encoding="utf-8", errors="ignore").splitlines():
-            line = raw_line.strip()
-            if not line or line.startswith("#"):
-                continue
-            if "=" not in line:
-                continue
-            k, v = line.split("=", 1)
-            k = k.strip()
-            v = v.strip().strip('"').strip("'")
-            if not k:
-                continue
-            # Only set if missing; system env wins.
-            if os.environ.get(k) is None:
-                os.environ[k] = v
-    finally:
-        _SERVICE_ENV_LOADED = True
-
-
-
-def _get_trello_key_token() -> tuple[str | None, str | None]:
-    """
-    Return (key, token) for Trello API calls.
-
-    Canonical env names:
-      - TRELLO_KEY
-      - TRELLO_TOKEN
-
-    Accepted alternates:
-      - TRELLO_API_KEY
-      - TRELLO_API_TOKEN
-      - TRELLO_AUTH_TOKEN
-    """
-    _load_service_env()
-
-    key_candidates = ["TRELLO_KEY", "TRELLO_API_KEY"]
-    token_candidates = ["TRELLO_TOKEN", "TRELLO_API_TOKEN", "TRELLO_AUTH_TOKEN"]
-
-    key = None
-    for k in key_candidates:
-        v = os.environ.get(k)
-        if v:
-            key = v.strip()
-            break
-
-    token = None
-    for k in token_candidates:
-        v = os.environ.get(k)
-        if v:
-            token = v.strip()
-            break
-
-    # Map alternates into canonical vars for consistency elsewhere.
-    if key and not os.environ.get("TRELLO_KEY"):
-        os.environ["TRELLO_KEY"] = key
-    if token and not os.environ.get("TRELLO_TOKEN"):
-        os.environ["TRELLO_TOKEN"] = token
-
-    return key, token
 
 
 def _pbkdf2_sha256(password: str, salt_b64: str, iterations: int) -> str:
@@ -277,6 +232,7 @@ def trello_card_url(card_id: str, request: Request):
     user = get_current_user_from_session(request)
     if not user:
         raise HTTPException(status_code=401, detail="Not authenticated")
+
 
     key, token = _get_trello_key_token()
     if not key or not token:
@@ -526,9 +482,10 @@ def admin_users_page(request: Request, msg: str | None = None, err: str | None =
   <h1>Admin — Users</h1>
 
   <div class="bar">
-    <a href="/">← Back to Search</a>
+    <a class="btnlink" href="/">← Back to Search</a>
+    <a class="btnlink" href="/admin/users">Users</a>
     <a class="btnlink" href="/admin/deleted-orders">Deleted Orders</a>
-    <a class="btnlink" href="/admin/clients">Client/Company List</a>
+    <a class="btnlink" href="/admin/clients">Clients/Company</a>
 
     <form method="post" action="/logout" style="margin:0;">
       <button type="submit">Logout</button>
@@ -879,9 +836,10 @@ def admin_clients_page(request: Request, msg: str | None = None, err: str | None
 </head>
 <body>
   <div class="topbar">
+    <a class="btnlink" href="/">← Back to Search</a>
     <a class="btnlink" href="/admin/users">Users</a>
     <a class="btnlink" href="/admin/deleted-orders">Deleted Orders</a>
-    <a class="btnlink" href="/admin/clients">Client/Company List</a>
+    <a class="btnlink" href="/admin/clients">Clients/Company</a>
     <span class="muted">Signed in as <b>__USERNAME__</b></span>
   </div>
 
@@ -1486,8 +1444,10 @@ def admin_deleted_orders_page(request: Request, msg: str | None = None, err: str
   <h1>Admin — Deleted Orders</h1>
 
   <div class=\"bar\">
-    <a class=\"btnlink\" href=\"/admin/users\">← Admin Users</a>
-    <a class=\"btnlink\" href=\"/\">Search</a>
+    <a class=\"btnlink\" href=\"/\">← Back to Search</a>
+    <a class=\"btnlink\" href=\"/admin/users\">Users</a>
+    <a class=\"btnlink\" href=\"/admin/deleted-orders\">Deleted Orders</a>
+    <a class=\"btnlink\" href=\"/admin/clients\">Clients/Company</a>
     <form method=\"post\" action=\"/logout\" style=\"margin:0;\">
       <button type=\"submit\">Logout</button>
     </form>

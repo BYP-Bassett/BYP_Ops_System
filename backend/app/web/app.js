@@ -1,6 +1,116 @@
 (() => {
   const API_URL = "/orders/search2";
 
+
+
+// ----- UI: Move Admin button/link to the far right on the main Search toolbar.
+// This is done defensively (server renders the button; JS repositions it).
+function moveAdminButtonToRightEdge() {
+  try {
+    const adminEl =
+      document.querySelector('a[href^="/admin"]') ||
+      document.querySelector('a[href*="/admin"]') ||
+      document.querySelector('[data-role="admin-link"]') ||
+      document.querySelector('#adminBtn') ||
+      document.querySelector('#adminLink');
+
+    if (!adminEl) return;
+
+    // Try to find the toolbar row that contains this control.
+    const row =
+      adminEl.closest('.toolbar,.topbar,.actions,.controls,.btnrow,header,nav') ||
+      adminEl.parentElement;
+
+    if (!row) return;
+
+    // Ensure the row is flex so margin-left:auto works.
+    const cs = window.getComputedStyle(row);
+    if (cs.display !== 'flex') {
+      row.style.display = 'flex';
+      row.style.flexWrap = 'wrap';
+      row.style.alignItems = 'center';
+      row.style.gap = '8px';
+    }
+
+    // Push the admin control to the far right.
+    adminEl.style.marginLeft = 'auto';
+  } catch (_) {
+    // no-op
+  }
+}
+
+// Run immediately (script is loaded at end of body) and also on DOMContentLoaded as a fallback.
+try { moveAdminButtonToRightEdge(); } catch (_) {}
+try { document.addEventListener('DOMContentLoaded', moveAdminButtonToRightEdge); } catch (_) {}
+
+// ----- UI: Reorder main Search page buttons into a single left-aligned group.
+// Desired order: My drafts, All, Search, Clear, New order
+function reorderSearchToolbarButtons() {
+  try {
+    // Only run on the main search page (defensive); if this doesn't match, we still no-op safely.
+    const path = (location && location.pathname) ? location.pathname : "";
+    if (path.startsWith("/admin") || path.startsWith("/order/")) return;
+
+    const norm = (s) => (s || "").toString().trim().toLowerCase();
+
+    const controls = Array.from(document.querySelectorAll(
+      'button, a.btnlink, a.button, a, input[type="button"], input[type="submit"]'
+    ));
+
+    const findByLabel = (label) => {
+      const target = norm(label);
+      for (const el of controls) {
+        let t = "";
+        if (el.tagName === "INPUT") t = el.value || "";
+        else t = el.textContent || "";
+        if (norm(t) === target) return el;
+      }
+      return null;
+    };
+
+    const draftsEl = findByLabel("My drafts") || findByLabel("My Drafts");
+    const allEl = findByLabel("All");
+    const searchEl = findByLabel("Search");
+    const clearEl = findByLabel("Clear");
+    const newOrderEl = findByLabel("New order") || findByLabel("New Order") || findByLabel("New");
+
+    if (!draftsEl || !allEl) return; // can't anchor reliably
+
+    // Find a toolbar container that contains drafts + all.
+    let toolbar = draftsEl.parentElement;
+    while (toolbar && toolbar !== document.body && !toolbar.contains(allEl)) {
+      toolbar = toolbar.parentElement;
+    }
+    if (!toolbar || toolbar === document.body) return;
+
+    // Pull target controls into the same toolbar (moving them if necessary).
+    const desired = [draftsEl, allEl, searchEl, clearEl, newOrderEl].filter(Boolean);
+
+    // Insert a marker at the start, then insert desired controls before it in order.
+    const marker = document.createComment("toolbar-marker");
+    toolbar.insertBefore(marker, toolbar.firstChild);
+
+    for (const el of desired) {
+      // If a control is outside, moving it here keeps it functional.
+      if (!toolbar.contains(el)) {
+        toolbar.insertBefore(el, marker);
+      } else {
+        toolbar.insertBefore(el, marker);
+      }
+    }
+
+    // Remove marker
+    toolbar.removeChild(marker);
+  } catch (_) {
+    // no-op
+  }
+}
+
+// Run now + on DOMContentLoaded.
+try { reorderSearchToolbarButtons(); } catch (_) {}
+try { document.addEventListener('DOMContentLoaded', reorderSearchToolbarButtons); } catch (_) {}
+
+
   // ----- Clients: best-effort create so new names appear in suggest (fast v1)
   async function ensureClientExists(clientName, companyName) {
     const name = (clientName || "").trim();
@@ -26,9 +136,6 @@
       return null;
     }
   }
-  // Expose for inline order page script
-  window.ensureClientExists = ensureClientExists;
-
 
   const PAGE_SIZE = 50; // change later when you decide defaults
 
