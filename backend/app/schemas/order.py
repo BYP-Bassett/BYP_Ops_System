@@ -146,6 +146,9 @@ class OrderResponse(BaseModel):
     client_company_name: Optional[str] = None
 
     sp_id: Optional[int] = None
+    # Convenience display: SP number (radio/video) or ART code (art)
+    sp_number: Optional[str] = None
+
     sp: Optional[SPLink] = None
 
     # Convenience display (non-editable): immediate parent reference for revision/add'l vers

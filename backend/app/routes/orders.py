@@ -19,7 +19,7 @@ def _audit_details(order, details=None):
     return d
 
 
-import datetime
+from datetime import datetime
 from sqlalchemy import or_, func, case
 from sqlalchemy.orm import Session, joinedload
 
@@ -166,7 +166,7 @@ class OrderSearchResponse(BaseModel):
 
 
 def _now_iso() -> str:
-    return datetime.datetime.now().isoformat(timespec="seconds")
+    return datetime.now().isoformat(timespec="seconds")
 
 
 def _order_snapshot(order: Order) -> dict:

@@ -115,22 +115,40 @@ def _notes_to_items_local(notes: str | None) -> list[str]:
 
 
 def _art_checklist_name(*, db: Session, order: Order, now: datetime) -> str:
-    mmddyy = now.strftime('%m%d%y')
+    """Return the ART checklist display code.
 
-    root_id = getattr(order, 'parent_order_id', None) or getattr(order, 'id', None)
+    Rules:
+      - Originals / additional versions: MMDDYY (no -R#)
+      - Revisions: MMDDYY-R# where # is 1-based revision count for the same root.
+    """
+    mmddyy = now.strftime("%m%d%y")
+
+    is_rev = bool(getattr(order, "is_revision", False)) or bool(getattr(order, "revision_of", None))
+    if not is_rev:
+        return mmddyy
+
+    # Prefer explicit revision_of root; fall back to parent_order_id/id.
+    root_id = getattr(order, "revision_of", None) or getattr(order, "parent_order_id", None) or getattr(order, "id", None)
+
     r_num = 1
-
     try:
         if root_id:
             q = (
                 db.query(Order)
                 .filter(
-                    Order.asset_type == 'art',
-                    Order.status == 'finalized',
+                    Order.asset_type == "art",
+                    Order.status == "finalized",
                     Order.trello_checklist_id.isnot(None),
-                    (Order.id == root_id) | (Order.parent_order_id == root_id),
                 )
             )
+
+            # Count only revisions for this root (exclude the original/addl versions).
+            if hasattr(Order, "revision_of"):
+                q = q.filter(Order.revision_of == root_id)
+            else:
+                # Defensive fallback for older schema.
+                q = q.filter((Order.parent_order_id == root_id) & (Order.is_revision == True))
+
             existing = int(q.count() or 0)
             r_num = max(1, existing + 1)
     except Exception:
@@ -166,6 +184,13 @@ def finalize_order(
     checklist_id = (trello_checklist_id or "").strip() or (getattr(order, "trello_checklist_id", None) or "").strip()
 
     asset = (getattr(order, "asset_type", "") or "").strip().lower()
+
+    # Additional versions must always create a NEW Trello card + checklist.
+    # Never reuse parent linkage even if the order inherited Trello IDs.
+    is_addl = bool(getattr(order, "is_additional_version", False)) or bool(getattr(order, "additional_version_of", None))
+    if is_addl:
+        card_id = ""
+        checklist_id = ""
 
     if asset in ("radio", "video"):
 
@@ -253,6 +278,8 @@ def finalize_order(
         # items reflect the updated notes.
         now = datetime.now()
         checklist_name = _art_checklist_name(db=db, order=order, now=now)
+        # Store the human-friendly ART code in sp_number for UI parity.
+        order.sp_number = checklist_name
         items = _notes_to_items_local(getattr(order, "notes", None))
 
         if checklist_id:

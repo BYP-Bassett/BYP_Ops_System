@@ -106,6 +106,46 @@ function reorderSearchToolbarButtons() {
   }
 }
 
+// ----- UI: Ensure a real Clients button exists on the Search page (not a naked link).
+function ensureClientsButton() {
+  try {
+    const newBtn = document.getElementById("newOrderBtn");
+    if (!newBtn || !newBtn.parentElement) return;
+
+    let clientsBtn = document.getElementById("clientsBtn");
+
+    // If a link exists, replace it with a proper button.
+    if (clientsBtn && clientsBtn.tagName === "A") {
+      const btn = document.createElement("button");
+      btn.id = "clientsBtn";
+      btn.className = "btn";
+      btn.textContent = (clientsBtn.textContent || "Clients").trim() || "Clients";
+      try { clientsBtn.parentElement.replaceChild(btn, clientsBtn); } catch (_) {}
+      clientsBtn = btn;
+    }
+
+    if (!clientsBtn) {
+      clientsBtn = document.createElement("button");
+      clientsBtn.id = "clientsBtn";
+      clientsBtn.className = "btn";
+      clientsBtn.textContent = "Clients";
+      // Insert right after "New order" in the same toolbar row.
+      try {
+        newBtn.parentElement.insertBefore(clientsBtn, newBtn.nextSibling);
+      } catch (_) {
+        newBtn.parentElement.appendChild(clientsBtn);
+      }
+    }
+
+    // Always wire the click (idempotent).
+    clientsBtn.onclick = function () {
+      try { window.location.href = "/admin/clients"; } catch (_) {}
+    };
+  } catch (_) {}
+}
+
+try { ensureClientsButton(); } catch (_) {}
+try { document.addEventListener('DOMContentLoaded', ensureClientsButton); } catch (_) {}
 // Run now + on DOMContentLoaded.
 try { reorderSearchToolbarButtons(); } catch (_) {}
 try { document.addEventListener('DOMContentLoaded', reorderSearchToolbarButtons); } catch (_) {}

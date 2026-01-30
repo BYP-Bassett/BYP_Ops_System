@@ -485,7 +485,7 @@ def admin_users_page(request: Request, msg: str | None = None, err: str | None =
     <a class="btnlink" href="/">← Back to Search</a>
     <a class="btnlink" href="/admin/users">Users</a>
     <a class="btnlink" href="/admin/deleted-orders">Deleted Orders</a>
-    <a class="btnlink" href="/admin/clients">Clients/Company</a>
+    <button class="btnlink" type="button" onclick="location.href='/admin/clients'">Clients/Company</button>
 
     <form method="post" action="/logout" style="margin:0;">
       <button type="submit">Logout</button>
@@ -839,7 +839,7 @@ def admin_clients_page(request: Request, msg: str | None = None, err: str | None
     <a class="btnlink" href="/">← Back to Search</a>
     <a class="btnlink" href="/admin/users">Users</a>
     <a class="btnlink" href="/admin/deleted-orders">Deleted Orders</a>
-    <a class="btnlink" href="/admin/clients">Clients/Company</a>
+    <button class="btnlink" type="button" onclick="location.href='/admin/clients'">Clients/Company</button>
     <span class="muted">Signed in as <b>__USERNAME__</b></span>
   </div>
 
@@ -1574,6 +1574,51 @@ def orders_admin_detail(request: Request, order_id: int):
         # Try to resolve SP info if relationship exists.
         sp_obj = _safe(o, "sp")
         sp_number = _safe(sp_obj, "sp_number") or _safe(o, "sp_number")
+
+        # If ART, show a stable "date code" in place of SP (MMDDYY, or MMDDYY-R# for revisions)
+        try:
+            if (str(_safe(o, "asset_type") or "")).strip().lower() == "art":
+                base_dt = _safe(o, "finalized_at") or _safe(o, "created_at")
+                dt_obj = None
+                if isinstance(base_dt, datetime.datetime):
+                    dt_obj = base_dt
+                elif isinstance(base_dt, str):
+                    s = base_dt.strip()
+                    if s.endswith("Z"):
+                        s = s[:-1] + "+00:00"
+                    try:
+                        dt_obj = datetime.datetime.fromisoformat(s)
+                    except Exception:
+                        dt_obj = None
+
+                if dt_obj:
+                    base = dt_obj.strftime("%m%d%y")
+                    if bool(_safe(o, "is_revision")):
+                        root_id = _safe(o, "parent_order_id") or _safe(o, "id")
+                        r_num = 1
+                        if root_id:
+                            revs = (
+                                db.query(Order)
+                                .filter(
+                                    Order.asset_type.ilike("art"),
+                                    Order.status == "finalized",
+                                    Order.is_revision == True,
+                                    or_(Order.id == root_id, Order.parent_order_id == root_id),
+                                )
+                                .order_by(Order.finalized_at.asc(), Order.id.asc())
+                                .all()
+                            )
+                            ids = [getattr(r, "id", None) for r in revs if getattr(r, "id", None) is not None]
+                            if _safe(o, "id") in ids:
+                                r_num = ids.index(_safe(o, "id")) + 1
+                            else:
+                                r_num = len(ids) + 1
+                        sp_number = f"{base}-R{r_num}"
+                    else:
+                        sp_number = base
+        except Exception:
+            pass
+
         sp_order_type = _safe(sp_obj, "order_type") or _safe(o, "sp_order_type") or _safe(o, "order_type")
         sp_revision_of = _safe(sp_obj, "revision_of") or _safe(o, "sp_revision_of") or _safe(o, "revision_of")
         additional_version_of = _safe(sp_obj, "additional_version_of") or _safe(o, "additional_version_of")
