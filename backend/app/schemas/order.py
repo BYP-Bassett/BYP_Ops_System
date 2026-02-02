@@ -149,6 +149,9 @@ class OrderResponse(BaseModel):
     # Convenience display: SP number (radio/video) or ART code (art)
     sp_number: Optional[str] = None
 
+    # Stored ART code (MMDDYY / MMDDYY-R#)
+    art_number: Optional[str] = None
+
     sp: Optional[SPLink] = None
 
     # Convenience display (non-editable): immediate parent reference for revision/add'l vers

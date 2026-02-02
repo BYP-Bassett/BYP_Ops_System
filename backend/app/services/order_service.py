@@ -278,8 +278,8 @@ def finalize_order(
         # items reflect the updated notes.
         now = datetime.now()
         checklist_name = _art_checklist_name(db=db, order=order, now=now)
-        # Store the human-friendly ART code in sp_number for UI parity.
-        order.sp_number = checklist_name
+        # Store the human-friendly ART code in art_number (ART does not use sp_number).
+        order.art_number = checklist_name
         items = _notes_to_items_local(getattr(order, "notes", None))
 
         if checklist_id:

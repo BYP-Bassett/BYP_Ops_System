@@ -505,7 +505,7 @@ return p.toString();
         "<td class=\"nowrap\">" + esc((o.rep_code || (o.rep_name ? String(o.rep_name).split(/[-=—]/)[0].trim() : ""))) + "</td>" +
         "<td class=\"nowrap\">" + esc(o.status) + "</td>" +
         "<td class=\"nowrap\">" + esc(o.asset_type) + "</td>" +
-        "<td class=\"nowrap\">" + esc(((o.sp && typeof o.sp === "object" && o.sp) ? (o.sp.sp_number || "") : (o.sp_number || ""))) + "</td>" +
+        "<td class=\"nowrap\">" + esc(((o.sp && typeof o.sp === "object" && o.sp) ? (o.sp.sp_number || "") : (o.sp_number || o.art_number || ""))) + "</td>" +
         "<td class=\"nowrap\">" + esc(((o.sp && typeof o.sp === "object" && o.sp) ? (o.sp.revision_of || "") : (o.sp_revision_of || o.revision_of || ""))) + "</td>" +
         "<td class=\"nowrap\">" + esc(((o.sp && typeof o.sp === "object" && o.sp) ? (o.sp.additional_version_of || "") : (o.additional_version_of || ""))) + "</td>" +
         "<td>" + esc(o.artist) + "</td>" +

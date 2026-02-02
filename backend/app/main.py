@@ -81,12 +81,25 @@ from app.routes.orders import router as orders_router
 
 # DB / models (for auth)
 from app.database.engine import SessionLocal
+from app.database.migrate import migrate_sqlite_schema
 from app.models.users import User
 from app.models.orders import Order
 from app.models.clients import Client
 
 
 app = FastAPI()
+
+
+# ---- SQLite schema patch-ups (dev only) ----
+# If you add new columns, SQLite won't magically learn them.
+# This keeps your local dev DB from face-planting.
+@app.on_event("startup")
+def _startup_migrate_sqlite_schema() -> None:
+    try:
+        migrate_sqlite_schema()
+    except Exception as e:
+        # Don't block server start in dev; you'll see the error in console.
+        print("WARN: migrate_sqlite_schema failed:", e)
 
 # ---- Sessions (Auth skeleton) ----
 # For dev: set SESSION_SECRET_KEY in your .env (or system env) to something non-stupid.

@@ -32,6 +32,9 @@ class Order(Base):
     # SP link (radio & video only)
     sp_id = Column(Integer, ForeignKey("sp_master.id"), nullable=True)
 
+    # ART code tracking (MMDDYY / MMDDYY-R#)
+    art_number = Column(String, nullable=True)
+
     # Workflow fields
     order_type = Column(String, nullable=True)
     description = Column(String, nullable=True)

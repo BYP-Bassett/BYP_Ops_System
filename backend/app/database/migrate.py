@@ -44,6 +44,9 @@ def migrate_sqlite_schema() -> None:
         if "trello_checklist_id" not in cols:
             alters.append("ALTER TABLE orders ADD COLUMN trello_checklist_id VARCHAR")
 
+        if "art_number" not in cols:
+            alters.append("ALTER TABLE orders ADD COLUMN art_number VARCHAR")
+
         if alters:
             for sql in alters:
                 cur.execute(sql)

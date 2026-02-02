@@ -13,6 +13,7 @@ def _audit_details(order, details=None):
     d.setdefault("order_id", getattr(order, "id", None))
     d.setdefault("sp_id", getattr(order, "sp_id", None))
     d.setdefault("sp_number", getattr(getattr(order, "sp", None), "sp_number", None))
+    d.setdefault("art_number", getattr(order, "art_number", None))
     d.setdefault("artist", getattr(order, "artist", None))
     d.setdefault("asset_type", getattr(order, "asset_type", None))
     d.setdefault("status", getattr(order, "status", None))
@@ -378,7 +379,9 @@ def _orders_search_query(
     if sp_number:
         sn = sp_number.strip()
         # join SPNumber table only when needed
-        q = q.join(SPNumber, Order.sp_id == SPNumber.id).filter(SPNumber.sp_number.ilike(f"%{sn}%"))
+        q = q.outerjoin(SPNumber, Order.sp_id == SPNumber.id).filter(
+            or_(SPNumber.sp_number.ilike(f"%{sn}%"), Order.art_number.ilike(f"%{sn}%"))
+        )
 
     if client_name:
         cn = client_name.strip()
@@ -841,7 +844,8 @@ def finalize(
         details={
             "before": before,
             "after": after,
-            "changes": _diff_dict(before, after, ["status", "finalized_at", "trello_card_id", "trello_checklist_id"]),
+            "changes": _diff_dict(before, after, ["status", "finalized_at", "trello_card_id", "trello_checklist_id",
+                "art_number",]),
         },
     )
     db.commit()
@@ -1508,6 +1512,7 @@ def update_order(
                 "length",
                 "instructions",
                 "trello_checklist_id",
+                "art_number",
             ]),
         },
     )
