@@ -1,72 +1,45 @@
-# Thread Handoff — SP Order System Thread #29 → Thread #30
+# Thread Handoff — SP Order System Thread #31 Reset
 
-**Date:** 2026-01-30 (America/Chicago)
+**Date:** 2026-02-03 (America/Chicago)
 
-## 1) Where we are (truth)
-### Working
-- Auth cookie sessions good; inactive users rejected
-- Web search page loads; delete works
-- Admin pages load (Users / Deleted Orders / Clients)
-- Save works (previously blocked by JS crash)
-- Finalize creates Trello card + checklist
-- Open Trello Card works
-- ART checklist naming bug “original had R1” is fixed at savepoint
+## Why reset
+Thread #31 turned into whack-a-mole because Clients page patches repeatedly:
+- overwrote unrelated routes in `app/main.py`
+- broke Search page ("Not Found")
+- changed styling/layout unintentionally
+- caused “Show inactive” to throw 422 parsing errors
 
-### Not solved / needs redesign
-- ART “display code” (MMDDYY / MMDDYY-R#) should **NOT** live in `sp_number`
-- Using `sp_number` for ART got wiped by correct “Art clears SP” rule
-- Conclusion: add a dedicated ART field
+We are freezing scope: preserve baseline, patch Clients surgically.
 
-## 2) Why the last thread got messy
-- Save failures were caused by front-end JS crash (`ensureClientExists is not defined`)
-- Finalize errors were caused by datetime import misuse inside `order_service.py`
-- Trying to overload `sp_number` for ART caused “stored then gone” behavior
+## Baseline to preserve
+- Tag: `savepoint-art-number-added-2026-02-02`
+- Search page + toolbar layout must remain unchanged.
 
-## 3) Branch + savepoint
-- Branch: `fix-delete-override`
-- Latest tag: `savepoint-art-checklist-r1-fixed-2026-01-30`
+## Current state
+- User restored `app/main.py` to baseline and uploaded it for surgical patching.
 
-## 4) Next goal (Thread #30)
-### Implement `art_number` end-to-end
-**Definition:** A visible ART code stored on the order, independent of SP numbers.
-- Original ART: `MMDDYY`
-- ART revision: `MMDDYY-R#`
+## Single focus next
+Fix `/admin/clients` to meet requirements:
+- users can view clients (login required)
+- show inactive works (no 422 on include_inactive)
+- per-row active checkbox toggles and persists
+- edit client/company + save
+- remove delete UI
+- do NOT break Search page/layout
 
-### Files likely to touch
-- `app\models\orders.py` (add column)
-- `app\schemas\order.py` (expose field)
-- `app\database\migrate.py` (add column)
-- `app\services\order_service.py` (set `art_number` on finalize for ART)
-- `app\routes\orders.py` (ensure API returns it where needed)
-- `app\web\app.js` (display on order page; search display choice)
+## Files involved
+- `app/main.py` (primary)
+- `app/web/app.js` (only if absolutely necessary; avoid touching)
 
-## 5) Acceptance tests (don’t guess, verify)
-1) Create **new ART** order → finalize
-   - Checklist name: `MMDDYY`
-   - Order shows ART#: `MMDDYY`
-   - Stored in DB: `art_number` filled, `sp_number` unchanged/blank
-2) Create **ART revision** → finalize
-   - Checklist name: `MMDDYY-R1`
-   - Order ART# matches
-3) Create **ART additional version** → finalize
-   - Creates a **new Trello card**
-   - Stores its own Trello IDs
-   - ART# is `MMDDYY` (no R1)
-4) Radio/Video still behave the same:
-   - SP numbers still stored in `sp_number`
-   - Flipping to Art still clears SP (but does not touch `art_number`)
+## Safe workflow
+1) Apply one replacement file.
+2) Restart server.
+3) Test Clients page + Search page.
+4) If fail: revert immediately.
 
-## 6) Canonical operating rules (carry forward)
-- One step at a time
-- No manual editing
-- Provide downloadable replacements with the same filename
-- No renaming files
-- Windows/PowerShell only
-- Route ordering matters
-
-## 7) Immediate next step
-Decide where ART# appears on the search page:
-- Option A: show ART# in the existing SP column for art rows
-- Option B: add a dedicated ART# column
-
-(Default recommendation: Option A unless you want maximum clarity.)
+## Quick verification commands
+From `C:\BYP_Ops_System\backend`:
+- `git status`
+- `git rev-parse --short HEAD`
+- `git describe --tags --exact-match`
+- `.\venv\Scripts\python.exe -c "import app.main; print(app.main.__file__)"`

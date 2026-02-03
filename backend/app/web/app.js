@@ -5,39 +5,7 @@
 
 // ----- UI: Move Admin button/link to the far right on the main Search toolbar.
 // This is done defensively (server renders the button; JS repositions it).
-function moveAdminButtonToRightEdge() {
-  try {
-    const adminEl =
-      document.querySelector('a[href^="/admin"]') ||
-      document.querySelector('a[href*="/admin"]') ||
-      document.querySelector('[data-role="admin-link"]') ||
-      document.querySelector('#adminBtn') ||
-      document.querySelector('#adminLink');
-
-    if (!adminEl) return;
-
-    // Try to find the toolbar row that contains this control.
-    const row =
-      adminEl.closest('.toolbar,.topbar,.actions,.controls,.btnrow,header,nav') ||
-      adminEl.parentElement;
-
-    if (!row) return;
-
-    // Ensure the row is flex so margin-left:auto works.
-    const cs = window.getComputedStyle(row);
-    if (cs.display !== 'flex') {
-      row.style.display = 'flex';
-      row.style.flexWrap = 'wrap';
-      row.style.alignItems = 'center';
-      row.style.gap = '8px';
-    }
-
-    // Push the admin control to the far right.
-    adminEl.style.marginLeft = 'auto';
-  } catch (_) {
-    // no-op
-  }
-}
+function moveAdminButtonToRightEdge(){ return; }
 
 // Run immediately (script is loaded at end of body) and also on DOMContentLoaded as a fallback.
 try { moveAdminButtonToRightEdge(); } catch (_) {}
@@ -45,108 +13,169 @@ try { document.addEventListener('DOMContentLoaded', moveAdminButtonToRightEdge);
 
 // ----- UI: Reorder main Search page buttons into a single left-aligned group.
 // Desired order: My drafts, All, Search, Clear, New order
-function reorderSearchToolbarButtons() {
+function reorderSearchToolbarButtons(){
   try {
-    // Only run on the main search page (defensive); if this doesn't match, we still no-op safely.
-    const path = (location && location.pathname) ? location.pathname : "";
-    if (path.startsWith("/admin") || path.startsWith("/order/")) return;
+    const norm = (s) => (s || "").trim().toLowerCase();
 
-    const norm = (s) => (s || "").toString().trim().toLowerCase();
-
-    const controls = Array.from(document.querySelectorAll(
-      'button, a.btnlink, a.button, a, input[type="button"], input[type="submit"]'
-    ));
-
-    const findByLabel = (label) => {
-      const target = norm(label);
-      for (const el of controls) {
-        let t = "";
-        if (el.tagName === "INPUT") t = el.value || "";
-        else t = el.textContent || "";
-        if (norm(t) === target) return el;
-      }
-      return null;
+    const findByText = (want) => {
+      const w = norm(want);
+      const nodes = Array.from(document.querySelectorAll("a,button"));
+      return nodes.find(n => norm(n.textContent) === w) || nodes.find(n => norm(n.textContent).includes(w));
     };
 
-    const draftsEl = findByLabel("My drafts") || findByLabel("My Drafts");
-    const allEl = findByLabel("All");
-    const searchEl = findByLabel("Search");
-    const clearEl = findByLabel("Clear");
-    const newOrderEl = findByLabel("New order") || findByLabel("New Order") || findByLabel("New");
+    // Find the four left buttons and an anchor to discover the host toolbar
+    const btnMyDrafts = document.getElementById("btnMyDrafts") || findByText("My drafts");
+    const btnAll      = document.getElementById("btnAll")      || findByText("All");
+    const btnSearch   = document.getElementById("btnSearch")   || findByText("Search");
+    const btnClear    = document.getElementById("btnClear")    || findByText("Clear");
 
-    if (!draftsEl || !allEl) return; // can't anchor reliably
+    const btnNewOrder = document.getElementById("btnNewOrder") || findByText("New order");
+    const btnClients  = document.getElementById("btnClients")  || findByText("Clients");
 
-    // Find a toolbar container that contains drafts + all.
-    let toolbar = draftsEl.parentElement;
-    while (toolbar && toolbar !== document.body && !toolbar.contains(allEl)) {
-      toolbar = toolbar.parentElement;
-    }
-    if (!toolbar || toolbar === document.body) return;
+    // Admin + Logout often live in the same toolbar row; be flexible
+    let btnAdmin  = document.getElementById("btnAdminUsers") || document.getElementById("btnAdmin") || findByText("Admin users") || findByText("Admin");
+    let btnLogout = document.getElementById("btnLogout") || findByText("Logout");
 
-    // Pull target controls into the same toolbar (moving them if necessary).
-    const desired = [draftsEl, allEl, searchEl, clearEl, newOrderEl].filter(Boolean);
+    const first = btnMyDrafts || btnAll || btnSearch || btnClear || btnNewOrder || btnClients || btnAdmin || btnLogout;
+    if (!first) return;
 
-    // Insert a marker at the start, then insert desired controls before it in order.
-    const marker = document.createComment("toolbar-marker");
-    toolbar.insertBefore(marker, toolbar.firstChild);
+    // Find a sane toolbar host
+    let host = first.closest(".toolbar") || first.closest(".byp-toolbar") || first.closest(".topbar") || first.closest(".searchbar") || first.parentElement;
+    if (!host) return;
 
-    for (const el of desired) {
-      // If a control is outside, moving it here keeps it functional.
-      if (!toolbar.contains(el)) {
-        toolbar.insertBefore(el, marker);
-      } else {
-        toolbar.insertBefore(el, marker);
+    // Ensure host is a flex container with space-between so we can do left/mid/right
+    host.style.display = "flex";
+    host.style.alignItems = "center";
+    host.style.justifyContent = "space-between";
+    host.style.gap = "12px";
+    host.style.flexWrap = "wrap";
+
+    // Create group containers
+    const ensureGroup = (id) => {
+      let g = document.getElementById(id);
+      if (!g) {
+        g = document.createElement("div");
+        g.id = id;
+        g.style.display = "flex";
+        g.style.alignItems = "center";
+        g.style.gap = "8px";
+        g.style.flexWrap = "wrap";
       }
+      return g;
+    };
+
+    const left = ensureGroup("searchToolbarLeftGroup");
+    const mid  = ensureGroup("searchToolbarMidGroup");
+    const right= ensureGroup("searchToolbarRightGroup");
+
+    // Put groups in host in order: left, mid, right
+    if (!left.parentElement) host.insertBefore(left, host.firstChild);
+    if (!mid.parentElement)  host.insertBefore(mid, left.nextSibling);
+    if (!right.parentElement) host.appendChild(right);
+
+    // Helper to move button into group
+    const move = (el, group) => {
+      if (!el || !group) return;
+      try { group.appendChild(el); } catch (_) {}
+    };
+
+    // LEFT: My Drafts, All, Search, Clear
+    move(btnMyDrafts, left);
+    move(btnAll, left);
+    move(btnSearch, left);
+    move(btnClear, left);
+
+    // MIDDLE: New order, Clients
+    move(btnNewOrder, mid);
+    move(btnClients, mid);
+
+    // RIGHT: Admin (rename to Admin), Logout
+    if (btnAdmin) {
+      // Normalize label
+      if (norm(btnAdmin.textContent) === "admin users") btnAdmin.textContent = "Admin";
+      move(btnAdmin, right);
+    }
+    move(btnLogout, right);
+
+    // "Logged in as ..." line ABOVE the toolbar row (right-aligned)
+    // Do this once; pull info from /me if available
+    const existingLine = document.getElementById("loggedInAsLine");
+    if (!existingLine) {
+      const line = document.createElement("div");
+      line.id = "loggedInAsLine";
+      line.style.fontSize = "12px";
+      line.style.opacity = "0.9";
+      line.style.textAlign = "right";
+      line.style.marginBottom = "6px";
+
+      // Insert just above the toolbar host
+      host.parentElement && host.parentElement.insertBefore(line, host);
+
+      // Populate asynchronously; be defensive about shape of /me
+      fetchMe().then(me => {
+        const name = (me && (me.display_name || me.name || me.email || me.username)) ? String(me.display_name || me.name || me.email || me.username) : "unknown";
+        line.textContent = `Logged in as: ${name}`;
+      }).catch(() => {
+        line.textContent = "Logged in as: unknown";
+      });
     }
 
-    // Remove marker
-    toolbar.removeChild(marker);
   } catch (_) {
-    // no-op
+    // ignore
   }
 }
 
 // ----- UI: Ensure a real Clients button exists on the Search page (not a naked link).
 function ensureClientsButton() {
   try {
-    const newBtn = document.getElementById("newOrderBtn");
-    if (!newBtn || !newBtn.parentElement) return;
+    const norm = (s) => (s || "").trim().toLowerCase();
 
+    // If we already have a clients button, just wire it.
     let clientsBtn = document.getElementById("clientsBtn");
 
-    // If a link exists, replace it with a proper button.
-    if (clientsBtn && clientsBtn.tagName === "A") {
-      const btn = document.createElement("button");
-      btn.id = "clientsBtn";
-      btn.className = "btn";
-      btn.textContent = (clientsBtn.textContent || "Clients").trim() || "Clients";
-      try { clientsBtn.parentElement.replaceChild(btn, clientsBtn); } catch (_) {}
-      clientsBtn = btn;
-    }
-
+    // Some older HTML used a plain link. If present, reuse it.
     if (!clientsBtn) {
-      clientsBtn = document.createElement("button");
-      clientsBtn.id = "clientsBtn";
-      clientsBtn.className = "btn";
-      clientsBtn.textContent = "Clients";
-      // Insert right after "New order" in the same toolbar row.
-      try {
-        newBtn.parentElement.insertBefore(clientsBtn, newBtn.nextSibling);
-      } catch (_) {
-        newBtn.parentElement.appendChild(clientsBtn);
+      const links = document.querySelectorAll('a[href="/admin/clients"], a[href="/admin/clients/"], a[href*="/admin/clients"]');
+      if (links && links.length) {
+        // Turn the first matching link into a button-like control by keeping the node and adding id.
+        clientsBtn = links[0];
+        try { clientsBtn.id = "clientsBtn"; } catch (_) {}
       }
     }
 
-    // Always wire the click (idempotent).
-    clientsBtn.onclick = function () {
+    // If still missing, create it (for ALL logged-in users).
+    if (!clientsBtn) {
+      const group = document.getElementById("searchToolbarLeftGroup");
+      // Use an existing toolbar button as styling reference if possible.
+      const sampleBtn =
+        document.getElementById("myDraftsBtn") ||
+        document.getElementById("allBtn") ||
+        document.getElementById("searchBtn") ||
+        document.getElementById("clearBtn") ||
+        document.getElementById("newOrderBtn");
+
+      clientsBtn = document.createElement("button");
+      clientsBtn.type = "button";
+      clientsBtn.id = "clientsBtn";
+      clientsBtn.textContent = "Clients";
+      if (sampleBtn && sampleBtn.className) clientsBtn.className = sampleBtn.className;
+
+      // Put it near the other toolbar buttons if we can.
+      if (group) group.appendChild(clientsBtn);
+      else if (sampleBtn && sampleBtn.parentElement) sampleBtn.parentElement.appendChild(clientsBtn);
+      else document.body.appendChild(clientsBtn); // last resort
+    }
+
+    // Wire it
+    clientsBtn.addEventListener("click", () => {
       try { window.location.href = "/admin/clients"; } catch (_) {}
-    };
+    });
   } catch (_) {}
 }
 
 try { ensureClientsButton(); } catch (_) {}
 try { document.addEventListener('DOMContentLoaded', ensureClientsButton); } catch (_) {}
-// Run now + on DOMContentLoaded.
+
 try { reorderSearchToolbarButtons(); } catch (_) {}
 try { document.addEventListener('DOMContentLoaded', reorderSearchToolbarButtons); } catch (_) {}
 
@@ -505,7 +534,7 @@ return p.toString();
         "<td class=\"nowrap\">" + esc((o.rep_code || (o.rep_name ? String(o.rep_name).split(/[-=—]/)[0].trim() : ""))) + "</td>" +
         "<td class=\"nowrap\">" + esc(o.status) + "</td>" +
         "<td class=\"nowrap\">" + esc(o.asset_type) + "</td>" +
-        "<td class=\"nowrap\">" + esc(((o.sp && typeof o.sp === "object" && o.sp) ? (o.sp.sp_number || "") : (o.sp_number || o.art_number || ""))) + "</td>" +
+        "<td class=\"nowrap\">" + esc(((o.sp && typeof o.sp === "object" && o.sp) ? (o.sp.sp_number || "") : (o.sp_number || ""))) + "</td>" +
         "<td class=\"nowrap\">" + esc(((o.sp && typeof o.sp === "object" && o.sp) ? (o.sp.revision_of || "") : (o.sp_revision_of || o.revision_of || ""))) + "</td>" +
         "<td class=\"nowrap\">" + esc(((o.sp && typeof o.sp === "object" && o.sp) ? (o.sp.additional_version_of || "") : (o.additional_version_of || ""))) + "</td>" +
         "<td>" + esc(o.artist) + "</td>" +

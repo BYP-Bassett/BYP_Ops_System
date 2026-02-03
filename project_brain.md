@@ -1,99 +1,46 @@
 # Project Brain — SP Order System (BYP Ops)
 
-**Updated:** 2026-01-30 (America/Chicago)
+**Updated:** 2026-02-03 (America/Chicago)
 
-## 0) What this is
-A Windows-first BYP Ops system to create/manage SP Orders (Radio/Video/Art), with:
-- FastAPI backend
-- Web UI (static HTML/JS)
-- Desktop GUI (Tkinter .pyw) — parity matters long-term
-- Trello integration (create card + checklist on finalize)
-- Cookie-session auth + role-based admin pages
+## Current baseline
+- **Latest known-good tag:** `savepoint-art-number-added-2026-02-02`
+- **HEAD (reported):** `77c49f7` — Add `art_number` field + sqlite migrate
 
-## 1) Repo / paths (canonical)
-- Project root: `C:\BYP_Ops_System\backend`
-- Backend package: `app\`
-- Web UI: `app\web\` (served content)
-- Key files (common touchpoints):
-  - `app\main.py` (FastAPI app, HTML routes, auth guard)
-  - `app\routes\orders.py` (API endpoints for orders)
-  - `app\services\order_service.py` (business logic: finalize, Trello)
-  - `app\services\trello_service.py` (Trello API wrapper)
-  - `app\schemas\order.py` (Pydantic response models)
-  - `app\models\orders.py` (SQLAlchemy model)
-  - `app\database\migrate.py` (SQLite migration helper)
-  - `app\web\app.js` (web UI JS)
+### What works at baseline
+- Auth: cookie sessions ✅, inactive users kicked ✅
+- Web Search/Orders: loads ✅, toolbar order ✅, save ✅, notes ✅, unfinalize/edit/save ✅
+- Trello: finalize creates card+checklist ✅, Open Trello Card ✅
+- Asset flip rules: Art↔Radio/Video SP assignment/clearing ✅
+- ART checklist first one has **no -R1** ✅
+- Trello checklist one-line width reference: **78 chars total** ✅
+- `art_number` field exists and is stable ✅
 
-## 2) How to run (canonical)
-```powershell
-cd C:\BYP_Ops_System\backend
-.\venv\Scripts\python.exe -m uvicorn app.main:app --reload
-```
+## Known problem area: Clients/Company page
+`/admin/clients` is unstable because it lives inside `app/main.py` (embedded HTML/JS/CSS + endpoints).
 
-## 3) Canonical rules (still law)
-- **One step at a time.**
-- **No manual file editing.**
-- Upload → assistant returns **downloadable replacement with the exact same filename**.
-- **No renaming files. Ever.**
-- **Windows only** (PowerShell).
-- No `${ }` in Python f-strings when embedding HTML/JS.
-- PowerShell: passwords/tokens with `$` must use **single quotes**.
-- Route ordering matters (e.g., `/orders/search` must come before `/orders/<built-in function id>`).
-- `rg` not installed.
-- PowerShell recursive search:
-  - `gci .\app -Recurse -File | Select-String -Pattern "whatever"`
+### Symptoms we’ve seen
+- Table loads empty (contract/filter mismatch)
+- “Show inactive” breaks or disappears
+- Per-row Active checkbox appears but does nothing
+- Accidental restyling (black background / layout drift)
+- Search page breaks if `main.py` gets overwritten incorrectly
 
-## 4) Current working state (as of savepoint)
-### Auth
-- Cookie sessions work
-- Inactive users are rejected server-side
+### Key gotcha
+Browser may send `include_inactive=` (empty string) which can trigger a **422 parsing error** if the backend expects int/bool without normalization.
 
-### Web UI
-- Search loads and works
-- Delete works
-- Search toolbar order: **My drafts, All, Search, Clear, New order**
-- Admin page nav is consistent across admin sections
+### Required target behavior
+- Page loads for logged-in users (not admin-only)
+- Default active-only
+- “Show inactive” works (no 422)
+- Per-row Active toggle persists
+- Editable client/company + save
+- No delete UI
 
-### Orders / Save / Finalize
-- Save works again (previous “nothing saves” chaos was caused by a JS crash)
-- Notes persist
-- Unfinalize → edit → Save persists
-- Asset type changes persist
-- Finalize creates Trello card + checklist correctly
-- Trello card description is **client name only**
-- Open Trello Card works
-
-### Asset type flip rules (confirmed)
-- Art → Radio/Video assigns SP immediately
-- Radio/Video → Art clears SP immediately
-
-### ART checklist naming
-- Original checklist should be **MMDDYY**
-- Revisions should be **MMDDYY-R1, R2, ...**
-- The “R1 on first checklist” bug is fixed at the current savepoint
-
-## 5) The big decision: stop overloading `sp_number` for ART
-### Problem
-`sp_number` is used for Radio/Video SP numbers and is correctly cleared when asset type becomes Art.
-Trying to store ART codes (MMDDYY / MMDDYY-R#) in `sp_number` causes “it stored, then it vanished” behavior.
-
-### Decision
-Add a **separate field** for ART display codes:
-- New DB field: `art_number` (or `art_code`)
-- UI shows it directly under SP number (order page)
-- Search page can show it in the SP column for Art OR add a dedicated ART column (TBD)
-
-## 6) Open work (next steps)
-1) **Add `art_number` field end-to-end**
-   - SQLAlchemy model + Pydantic schema + migration + finalize logic writes it
-2) **UI updates**
-   - Order page: show ART# under SP#
-   - Search page: show ART# for art rows (exact placement TBD)
-3) **Client lifecycle cleanup**
-   - Reintroduce “Show deactivated” toggle
-   - Deactivation should set `Client.is_active = False` (not hard delete)
-4) **ART checklist tracking**
-   - Store checklist IDs for art like SP tracking already does for radio/video (Trello IDs stay in `trello_*` fields)
-
-## 7) Latest savepoint
-- `savepoint-art-checklist-r1-fixed-2026-01-30`
+## Canonical rules
+- One step at a time.
+- No manual file editing.
+- Upload → I return downloadable replacement with the **exact same filename**.
+- No renaming files. Ever.
+- Windows only.
+- No `${}` inside Python f-strings with embedded HTML/JS.
+- Route ordering matters.

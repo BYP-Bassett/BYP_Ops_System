@@ -719,11 +719,41 @@ def admin_users_set_password(request: Request, user_id: int, password: str = For
 
 
 
-# ---- Admin: Client / Company List ----
+# ---- Clients / Company List (web) ----
+# NOTE: Despite the "/admin/*" URL, this page is intentionally available to ANY logged-in user.
+# Goal: stable client/company editing + active/inactive toggle. No delete UI.
+
+def _parse_boolish(v, default: bool = False) -> bool:
+    """
+    Accepts bool-ish inputs from query params / forms:
+      - True/False
+      - 1/0
+      - "true"/"false", "on"/"off", "yes"/"no"
+      - "" (empty string) -> default (avoids 422 int_parsing nonsense)
+    """
+    if v is None:
+        return default
+    if isinstance(v, bool):
+        return bool(v)
+    s = str(v).strip().lower()
+    if s == "":
+        return default
+    if s in ("1", "true", "t", "yes", "y", "on"):
+        return True
+    if s in ("0", "false", "f", "no", "n", "off"):
+        return False
+    return default
+
 
 @app.get("/admin/clients.json", include_in_schema=False)
-def admin_clients_json(request: Request, q: str | None = None, limit: int = 500):
-    gate = _require_admin_or_redirect(request)
+def clients_json(
+    request: Request,
+    q: str | None = None,
+    include_inactive: str | None = None,
+    limit: int = 500,
+):
+    # Logged-in users only (NOT admin-only).
+    gate = _require_login_or_redirect(request)
     if gate is not None:
         # fetch() callers need JSON, not HTML redirects.
         try:
@@ -737,9 +767,16 @@ def admin_clients_json(request: Request, q: str | None = None, limit: int = 500)
     from sqlalchemy import or_
 
     q_txt = (q or "").strip()
+    show_inactive = _parse_boolish(include_inactive, default=False)
+
     db = SessionLocal()
     try:
         query = db.query(Client)
+
+        # Default: active-only.
+        if hasattr(Client, "is_active") and (not show_inactive):
+            query = query.filter(getattr(Client, "is_active") == True)  # noqa: E712
+
         if q_txt:
             like = f"%{q_txt}%"
             try:
@@ -752,69 +789,81 @@ def admin_clients_json(request: Request, q: str | None = None, limit: int = 500)
 
         items = []
         for c in clients:
-            items.append({
-                "id": int(getattr(c, "id")),
-                "client_name": str(getattr(c, "client_name") or ""),
-                "company_name": (getattr(c, "company_name", None) if getattr(c, "company_name", None) is not None else ""),
-            })
+            items.append(
+                {
+                    "id": int(getattr(c, "id")),
+                    "client_name": str(getattr(c, "client_name") or ""),
+                    "company_name": (getattr(c, "company_name", None) if getattr(c, "company_name", None) is not None else ""),
+                    "is_active": bool(getattr(c, "is_active", True)),
+                }
+            )
 
+        # Count (respects same filters)
         try:
             count_q = db.query(Client)
+
+            if hasattr(Client, "is_active") and (not show_inactive):
+                count_q = count_q.filter(getattr(Client, "is_active") == True)  # noqa: E712
+
             if q_txt:
                 like = f"%{q_txt}%"
                 try:
                     count_q = count_q.filter(or_(Client.client_name.ilike(like), Client.company_name.ilike(like)))
                 except Exception:
                     count_q = count_q.filter(Client.client_name.ilike(like))
+
             count = int(count_q.count())
         except Exception:
             count = int(len(items))
 
-        return JSONResponse(content={"value": items, "Count": count})
+        return JSONResponse(content={"value": items, "Count": count, "include_inactive": bool(show_inactive)})
     finally:
         db.close()
 
 
 @app.get("/admin/clients", include_in_schema=False)
-def admin_clients_page(request: Request, msg: str | None = None, err: str | None = None):
-    gate = _require_admin_or_redirect(request)
+def clients_page(request: Request, msg: str | None = None, err: str | None = None):
+    gate = _require_login_or_redirect(request)
     if gate is not None:
         return gate
 
-    username = (_username_from_session(request) or request.session.get('username') or 'admin')
+    username = (_username_from_session(request) or request.session.get("username") or "")
 
     # Bootstrap initial data server-side so the page never appears blank.
     db = SessionLocal()
     try:
         try:
-            clients = db.query(Client).order_by(Client.client_name.asc()).limit(500).all()
-            boot_items = [{
-                "id": int(getattr(c, "id")),
-                "client_name": str(getattr(c, "client_name") or ""),
-                "company_name": (getattr(c, "company_name", None) if getattr(c, "company_name", None) is not None else ""),
-            } for c in clients]
-            boot_count = int(db.query(Client).count())
+            clients = db.query(Client)
+            if hasattr(Client, "is_active"):
+                clients = clients.filter(getattr(Client, "is_active") == True)  # noqa: E712
+            clients = clients.order_by(Client.client_name.asc()).limit(500).all()
+            boot_items = [
+                {
+                    "id": int(getattr(c, "id")),
+                    "client_name": str(getattr(c, "client_name") or ""),
+                    "company_name": (getattr(c, "company_name", None) if getattr(c, "company_name", None) is not None else ""),
+                    "is_active": bool(getattr(c, "is_active", True)),
+                }
+                for c in clients
+            ]
+            boot_count = int(len(boot_items))
         except Exception:
             boot_items = []
             boot_count = 0
     finally:
         db.close()
 
-    clients_bootstrap_json = json.dumps({"value": boot_items, "Count": boot_count}).replace("</", "<\\/")
+    clients_bootstrap_json = json.dumps({"value": boot_items, "Count": boot_count, "include_inactive": False}).replace("</", "<\\/")
 
-    msg_html = ""
-    err_html = ""
-    if msg:
-        msg_html = f"<div class='ok'>{_html_escape(msg)}</div>"
-    if err:
-        err_html = f"<div class='err'>{_html_escape(err)}</div>"
+    msg_html = f"<div class='ok'>{_html_escape(msg)}</div>" if msg else ""
+    err_html = f"<div class='err'>{_html_escape(err)}</div>" if err else ""
 
     html_tmpl = r"""<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>BYP Ops — Admin Clients</title>
+  <title>BYP Ops — Clients/Company</title>
   <style>
     body { font-family: Arial, sans-serif; margin: 16px; }
     .topbar { display:flex; gap:10px; align-items:center; margin-bottom:12px; flex-wrap:wrap; }
@@ -823,28 +872,27 @@ def admin_clients_page(request: Request, msg: str | None = None, err: str | None
     .ok { background:#eaffea; border:1px solid #7ad67a; padding:8px 10px; border-radius:8px; margin:10px 0; }
     .err { background:#ffecec; border:1px solid #d67a7a; padding:8px 10px; border-radius:8px; margin:10px 0; }
     .muted { color:#666; font-size:12px; }
-    .grid { display:grid; grid-template-columns: 1fr 360px; gap:14px; align-items:start; }
+    .grid { display:grid; grid-template-columns: 1fr 380px; gap:14px; align-items:start; }
     .list { border:1px solid #ddd; border-radius:12px; overflow:hidden; }
-    .listHeader { display:flex; gap:10px; align-items:center; padding:10px; border-bottom:1px solid #eee; background:#fafafa; }
-    .listHeader input { flex: 1; padding:8px; border:1px solid #ccc; border-radius:8px; }
+    .listHeader { display:flex; gap:10px; align-items:center; padding:10px; border-bottom:1px solid #eee; background:#fafafa; flex-wrap:wrap; }
+    .listHeader input[type="text"] { flex: 1; min-width: 210px; padding:8px; border:1px solid #ccc; border-radius:8px; }
     .listHeader button { padding:8px 10px; border:1px solid #999; border-radius:8px; background:#f3f3f3; cursor:pointer; }
     .rows { max-height: 70vh; overflow:auto; }
-    .row { display:grid; grid-template-columns: 60px 1fr 1fr; gap:8px; padding:4px 8px; border-bottom:1px solid #f0f0f0; cursor:pointer; align-items:center; line-height:1.1; }
+    .row { display:grid; grid-template-columns: 60px 1fr 1fr 70px; gap:8px; padding:6px 8px; border-bottom:1px solid #f0f0f0; cursor:pointer; align-items:center; line-height:1.1; }
     .row:hover { background:#f7f7f7; }
     .row.sel { background:#dbeafe; }
     .cid { color:#666; font-size:12px; }
     .cname { font-weight: 400; }
     .comp { color:#333; }
+    .badgeOff { display:inline-block; padding:2px 6px; border-radius:999px; border:1px solid #ef4444; background:#fee2e2; color:#991b1b; font-size:11px; text-align:center; }
+    .badgeOn { display:inline-block; padding:2px 6px; border-radius:999px; border:1px solid #22c55e; background:#dcfce7; color:#166534; font-size:11px; text-align:center; }
     .panel { border:1px solid #ddd; border-radius:12px; padding:12px; }
     .panel h2 { margin:0 0 10px 0; font-size:16px; }
     .field { margin-bottom:10px; }
     .field label { display:block; font-size:12px; color:#666; margin-bottom:4px; }
-    .field input { width:100%; padding:8px; border:1px solid #ccc; border-radius:8px; }
+    .field input[type="text"] { width:100%; padding:8px; border:1px solid #ccc; border-radius:8px; }
     .pill { display:inline-block; padding:2px 8px; border:1px solid #ccc; border-radius:999px; background:#f6f6f6; font-size:12px; }
-    .danger { background:#fee2e2 !important; border-color:#ef4444 !important; }
-    .ctx { position:fixed; display:none; z-index:9999; background:#fff; border:1px solid #ccc; border-radius:10px; overflow:hidden; box-shadow:0 10px 28px rgba(0,0,0,0.15); }
-    .ctx button { width:100%; border:0; background:#fff; padding:10px 12px; text-align:left; cursor:pointer; }
-    .ctx button:hover { background:#f5f5f5; }
+    .chk { display:flex; gap:8px; align-items:center; user-select:none; }
   </style>
 </head>
 <body>
@@ -864,6 +912,12 @@ def admin_clients_page(request: Request, msg: str | None = None, err: str | None
       <div class="listHeader">
         <input id="q" type="text" placeholder="Filter (name or company)..." />
         <button id="refreshBtn" type="button">Refresh</button>
+
+        <label class="chk">
+          <input id="showInactive" type="checkbox" />
+          <span>Show inactive</span>
+        </label>
+
         <span class="muted" id="countLbl"></span>
       </div>
       <div class="rows" id="rows"></div>
@@ -875,27 +929,34 @@ def admin_clients_page(request: Request, msg: str | None = None, err: str | None
         <label>ID</label>
         <div><span class="pill" id="editId">—</span></div>
       </div>
+
       <div class="field">
         <label>Client Name</label>
         <input id="editClient" type="text" />
       </div>
+
       <div class="field">
         <label>Company Name</label>
         <input id="editCompany" type="text" />
       </div>
+
+      <div class="field">
+        <label class="chk">
+          <input id="editActive" type="checkbox" />
+          <span>Active</span>
+        </label>
+      </div>
+
       <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
         <button id="saveBtn" type="button" disabled>Save</button>
         <button id="clearBtn" type="button">Clear</button>
         <span class="muted" id="editMsg"></span>
       </div>
+
       <div style="margin-top:14px;" class="muted">
-        Tips: Click to select • Ctrl+Click multi-select • Shift+Click range • Right-click for menu
+        Tip: Click a row to edit. That’s it. No right-click circus.
       </div>
     </div>
-  </div>
-
-  <div class="ctx" id="ctxMenu">
-    <button id="ctxDelete" class="danger" type="button">Delete selected…</button>
   </div>
 
 <script>
@@ -904,26 +965,31 @@ window.__CLIENTS_BOOTSTRAP__ = __CLIENTS_BOOTSTRAP_JSON__;
   var rowsEl = document.getElementById("rows");
   var qEl = document.getElementById("q");
   var refreshBtn = document.getElementById("refreshBtn");
+  var showInactiveEl = document.getElementById("showInactive");
   var countLbl = document.getElementById("countLbl");
 
   var editIdEl = document.getElementById("editId");
   var editClientEl = document.getElementById("editClient");
   var editCompanyEl = document.getElementById("editCompany");
+  var editActiveEl = document.getElementById("editActive");
   var saveBtn = document.getElementById("saveBtn");
   var clearBtn = document.getElementById("clearBtn");
   var editMsg = document.getElementById("editMsg");
 
-  var ctx = document.getElementById("ctxMenu");
-  var ctxDelete = document.getElementById("ctxDelete");
-
   var items = [];
-  var selected = [];
-  var anchorIndex = null;
   var focusedId = null;
 
   function esc(s){
     return String(s || "").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
   }
+
+  function findItem(id){
+    for (var i=0;i<items.length;i++){
+      if (String(items[i].id) === String(id)) return items[i];
+    }
+    return null;
+  }
+
   function setEdit(id){
     focusedId = id;
     editMsg.textContent = "";
@@ -931,22 +997,26 @@ window.__CLIENTS_BOOTSTRAP__ = __CLIENTS_BOOTSTRAP_JSON__;
       editIdEl.textContent = "—";
       editClientEl.value = "";
       editCompanyEl.value = "";
+      editActiveEl.checked = true;
       saveBtn.disabled = true;
       return;
     }
-    var it = items.find(function(x){ return String(x.id) === String(id); });
+    var it = findItem(id);
     if (!it){
       editIdEl.textContent = "—";
       editClientEl.value = "";
       editCompanyEl.value = "";
+      editActiveEl.checked = true;
       saveBtn.disabled = true;
       return;
     }
     editIdEl.textContent = String(it.id);
     editClientEl.value = it.client_name || "";
     editCompanyEl.value = it.company_name || "";
+    editActiveEl.checked = (it.is_active !== false);
     saveBtn.disabled = true;
   }
+
   function render(){
     rowsEl.innerHTML = "";
     for (var i=0;i<items.length;i++){
@@ -954,9 +1024,8 @@ window.__CLIENTS_BOOTSTRAP__ = __CLIENTS_BOOTSTRAP_JSON__;
       var div = document.createElement("div");
       div.className = "row";
       div.dataset.id = String(it.id);
-      div.dataset.index = String(i);
 
-      if (selected.indexOf(String(it.id)) >= 0){
+      if (focusedId && String(focusedId) === String(it.id)){
         div.className += " sel";
       }
 
@@ -972,75 +1041,42 @@ window.__CLIENTS_BOOTSTRAP__ = __CLIENTS_BOOTSTRAP_JSON__;
       comp.className = "comp";
       comp.textContent = it.company_name || "";
 
+      var badge = document.createElement("div");
+      if (it.is_active === false){
+        badge.className = "badgeOff";
+        badge.textContent = "OFF";
+      } else {
+        badge.className = "badgeOn";
+        badge.textContent = "ON";
+      }
+
       div.appendChild(cid);
       div.appendChild(cn);
       div.appendChild(comp);
+      div.appendChild(badge);
 
-      div.addEventListener("click", function(ev){
+      div.addEventListener("click", function(){
         var id = this.dataset.id;
-        var idx = parseInt(this.dataset.index, 10);
-
-        if (ev.shiftKey && anchorIndex !== null){
-          var a = anchorIndex;
-          var b = idx;
-          if (a > b){ var t=a; a=b; b=t; }
-          var next = [];
-          for (var k=a;k<=b;k++){
-            next.push(String(items[k].id));
-          }
-          selected = next;
-        } else if (ev.ctrlKey || ev.metaKey){
-          var p = selected.indexOf(String(id));
-          if (p >= 0) selected.splice(p,1);
-          else selected.push(String(id));
-          anchorIndex = idx;
-        } else {
-          selected = [String(id)];
-          anchorIndex = idx;
-        }
-
         setEdit(id);
         render();
-      });
-
-      div.addEventListener("contextmenu", function(ev){
-        ev.preventDefault();
-        var id = this.dataset.id;
-        var idx = parseInt(this.dataset.index, 10);
-
-        if (selected.indexOf(String(id)) < 0){
-          selected = [String(id)];
-          anchorIndex = idx;
-          setEdit(id);
-          render();
-        }
-        showCtx(ev.clientX, ev.clientY);
       });
 
       rowsEl.appendChild(div);
     }
 
     countLbl.textContent = items.length ? (items.length + " clients") : "0 clients";
-    ctxDelete.disabled = selected.length === 0;
   }
-
-  function hideCtx(){ ctx.style.display = "none"; }
-  function showCtx(x,y){
-    ctx.style.display = "block";
-    ctx.style.left = x + "px";
-    ctx.style.top = y + "px";
-  }
-
-  document.addEventListener("click", function(){ hideCtx(); });
-  window.addEventListener("scroll", function(){ hideCtx(); }, true);
-  window.addEventListener("resize", function(){ hideCtx(); });
 
   function load(){
-    hideCtx();
     rowsEl.innerHTML = "<div class='row'><span class='muted'>Loading…</span></div>";
+
     var q = qEl.value || "";
     var url = "/admin/clients.json";
-    if (q){ url += "?q=" + encodeURIComponent(q); }
+    var parts = [];
+    if (q){ parts.push("q=" + encodeURIComponent(q)); }
+    if (showInactiveEl.checked){ parts.push("include_inactive=1"); }
+    if (parts.length){ url += "?" + parts.join("&"); }
+
     fetch(url, { credentials: "same-origin" })
       .then(function(res){ return res.text().then(function(t){ return {ok:res.ok, status:res.status, text:t}; }); })
       .then(function(r){
@@ -1050,10 +1086,8 @@ window.__CLIENTS_BOOTSTRAP__ = __CLIENTS_BOOTSTRAP_JSON__;
         }
         var data = null;
         try { data = JSON.parse(r.text); } catch(e) {}
-        var arr = null;
-        if (Array.isArray(data)) arr = data;
-        else if (data && Array.isArray(data.value)) arr = data.value;
 
+        var arr = (data && Array.isArray(data.value)) ? data.value : null;
         if (!arr){
           var t = (r.text || "");
           var looksHtml = (t.indexOf("<!doctype") >= 0) || (t.indexOf("<html") >= 0);
@@ -1065,15 +1099,19 @@ window.__CLIENTS_BOOTSTRAP__ = __CLIENTS_BOOTSTRAP_JSON__;
           rowsEl.innerHTML = "<div class='row'><b>Bad JSON</b><div style='margin-left:10px;white-space:pre-wrap;max-height:140px;overflow:auto;'>" + esc(t.slice(0, 2000)) + "</div></div>";
           return;
         }
+
         items = arr;
 
-        var existing = {};
-        for (var i=0;i<items.length;i++){ existing[String(items[i].id)] = true; }
-        selected = selected.filter(function(id){ return existing[String(id)]; });
+        // If current selection disappeared due to filter, clear it.
+        if (focusedId){
+          var ok = false;
+          for (var i=0;i<items.length;i++){
+            if (String(items[i].id) === String(focusedId)) { ok = true; break; }
+          }
+          if (!ok) focusedId = null;
+        }
 
-        if (focusedId && !existing[String(focusedId)]) focusedId = null;
         if (focusedId) setEdit(focusedId);
-        else if (selected.length === 1) setEdit(selected[0]);
         else setEdit(null);
 
         render();
@@ -1083,24 +1121,36 @@ window.__CLIENTS_BOOTSTRAP__ = __CLIENTS_BOOTSTRAP_JSON__;
       });
   }
 
+  function setSaveEnabled(){
+    if (!focusedId){ saveBtn.disabled = true; return; }
+    var it = findItem(focusedId);
+    if (!it){ saveBtn.disabled = true; return; }
+
+    var changed =
+      (String(editClientEl.value||"") !== String(it.client_name||"")) ||
+      (String(editCompanyEl.value||"") !== String(it.company_name||"")) ||
+      ((editActiveEl.checked ? true : false) !== (it.is_active !== false));
+
+    saveBtn.disabled = !changed;
+  }
+
+  editClientEl.addEventListener("input", setSaveEnabled);
+  editCompanyEl.addEventListener("input", setSaveEnabled);
+  editActiveEl.addEventListener("change", setSaveEnabled);
+
   refreshBtn.addEventListener("click", load);
+  showInactiveEl.addEventListener("change", function(){
+    focusedId = null;
+    setEdit(null);
+    load();
+  });
+
   qEl.addEventListener("keydown", function(ev){
     if (ev.key === "Enter"){ load(); }
   });
 
-  function setSaveEnabled(){
-    if (!focusedId){ saveBtn.disabled = true; return; }
-    var it = items.find(function(x){ return String(x.id) === String(focusedId); });
-    if (!it){ saveBtn.disabled = true; return; }
-    var changed = (String(editClientEl.value||"") !== String(it.client_name||"")) || (String(editCompanyEl.value||"") !== String(it.company_name||""));
-    saveBtn.disabled = !changed;
-  }
-  editClientEl.addEventListener("input", setSaveEnabled);
-  editCompanyEl.addEventListener("input", setSaveEnabled);
-
   clearBtn.addEventListener("click", function(){
-    selected = [];
-    anchorIndex = null;
+    focusedId = null;
     setEdit(null);
     render();
   });
@@ -1111,6 +1161,9 @@ window.__CLIENTS_BOOTSTRAP__ = __CLIENTS_BOOTSTRAP_JSON__;
     var form = new FormData();
     form.append("client_name", editClientEl.value || "");
     form.append("company_name", editCompanyEl.value || "");
+    if (editActiveEl.checked){
+      form.append("is_active", "1");
+    }
 
     saveBtn.disabled = true;
     editMsg.textContent = "Saving…";
@@ -1136,61 +1189,11 @@ window.__CLIENTS_BOOTSTRAP__ = __CLIENTS_BOOTSTRAP_JSON__;
     });
   });
 
-  ctxDelete.addEventListener("click", function(){
-    hideCtx();
-    if (!selected.length) return;
-
-    var n = selected.length;
-    if (!confirm("Delete " + n + " selected client(s)?\n\nFinalized orders will block deletion (we'll skip those).")) return;
-
-    fetch("/admin/clients/delete", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ids: selected }),
-      credentials: "same-origin"
-    })
-    .then(function(res){ return res.text().then(function(t){ return {ok:res.ok, status:res.status, text:t}; }); })
-    .then(function(r){
-      if (!r.ok){
-        alert("Delete failed (HTTP " + r.status + "):\n\n" + r.text);
-        return;
-      }
-      var data = null;
-      try { data = JSON.parse(r.text); } catch(e) {}
-      if (!data){
-        alert("Delete response was not JSON:\n\n" + r.text);
-        load();
-        return;
-      }
-      var msg = "";
-      if (data.deleted && data.deleted.length){
-        msg += "Deleted: " + data.deleted.join(", ") + "\n";
-      }
-      if (data.blocked && data.blocked.length){
-        msg += "\nSkipped (finalized orders): " + data.blocked.map(function(x){ return x.id; }).join(", ") + "\n";
-      }
-      if (data.not_found && data.not_found.length){
-        msg += "\nNot found: " + data.not_found.join(", ") + "\n";
-      }
-      alert(msg || "Done.");
-      selected = [];
-      anchorIndex = null;
-      focusedId = null;
-      load();
-    })
-    .catch(function(err){
-      alert("Delete failed:\n\n" + String(err));
-    });
-  });
-
-  // Boot immediately, then auto-load from JSON.
+  // Bootstrap render, then load.
   try {
     var boot = window.__CLIENTS_BOOTSTRAP__;
     if (boot && boot.value && Array.isArray(boot.value)) {
       items = boot.value;
-      selected = [];
-      anchorIndex = null;
-      focusedId = null;
       render();
     }
   } catch(e) {}
@@ -1202,79 +1205,68 @@ window.__CLIENTS_BOOTSTRAP__ = __CLIENTS_BOOTSTRAP_JSON__;
 </html>"""
 
     html = (
-        html_tmpl.replace("__USERNAME__", username)
+        html_tmpl.replace("__USERNAME__", _html_escape(username))
                  .replace("__MSG_BLOCK__", msg_html)
                  .replace("__ERR_BLOCK__", err_html)
                  .replace("__CLIENTS_BOOTSTRAP_JSON__", clients_bootstrap_json)
     )
     return HTMLResponse(content=html)
 
+
 @app.post("/admin/clients/{client_id}/update", include_in_schema=False)
-def admin_clients_update(
+def clients_update(
     request: Request,
     client_id: int,
     client_name: str = Form(...),
     company_name: str = Form(""),
     is_active: str | None = Form(None),
 ):
-    gate = _require_admin_or_redirect(request)
+    # Logged-in users only (NOT admin-only).
+    gate = _require_login_or_redirect(request)
     if gate is not None:
+        # fetch() callers need JSON, not HTML redirects.
+        try:
+            from starlette.responses import RedirectResponse as _RR
+            if isinstance(gate, _RR):
+                return JSONResponse(content={"detail": "Not authenticated"}, status_code=401)
+        except Exception:
+            pass
         return gate
 
     cn = (client_name or "").strip()
     co = (company_name or "").strip()
-    active = bool(is_active is not None)
+    active = _parse_boolish(is_active, default=False)  # checkbox sends param only when checked in our JS
 
     if not cn:
-        return RedirectResponse(url="/admin/clients?err=" + urllib.parse.quote("Client name cannot be blank."), status_code=303)
+        return JSONResponse(content={"detail": "Client name cannot be blank."}, status_code=400)
 
     db = SessionLocal()
     try:
         c = db.query(Client).filter(Client.id == client_id).first()
         if not c:
-            return RedirectResponse(url="/admin/clients?err=" + urllib.parse.quote("Client not found."), status_code=303)
+            return JSONResponse(content={"detail": "Client not found."}, status_code=404)
 
         c.client_name = cn
-        c.company_name = (co or None)
-        c.is_active = active
+        # store empty as NULL for cleanliness
+        if hasattr(c, "company_name"):
+            c.company_name = (co or None)
+
+        if hasattr(c, "is_active"):
+            c.is_active = bool(active)
 
         db.add(c)
         db.commit()
+
+        return JSONResponse(content={"ok": True})
     except Exception as e:
         db.rollback()
-        return RedirectResponse(url="/admin/clients?err=" + urllib.parse.quote(f"Update failed: {e}"), status_code=303)
+        return JSONResponse(content={"detail": f"Update failed: {e}"}, status_code=500)
     finally:
         db.close()
 
-    return RedirectResponse(url="/admin/clients?msg=" + urllib.parse.quote("Saved."), status_code=303)
 
-
-@app.post("/admin/clients/{client_id}/toggle", include_in_schema=False)
-def admin_clients_toggle(request: Request, client_id: int):
-    gate = _require_admin_or_redirect(request)
-    if gate is not None:
-        return gate
-
-    db = SessionLocal()
-    try:
-        c = db.query(Client).filter(Client.id == client_id).first()
-        if not c:
-            return RedirectResponse(url="/admin/clients?err=" + urllib.parse.quote("Client not found."), status_code=303)
-
-        c.is_active = not bool(getattr(c, "is_active", True))
-        db.add(c)
-        db.commit()
-    except Exception as e:
-        db.rollback()
-        return RedirectResponse(url="/admin/clients?err=" + urllib.parse.quote(f"Toggle failed: {e}"), status_code=303)
-    finally:
-        db.close()
-
-    return RedirectResponse(url="/admin/clients?msg=" + urllib.parse.quote("Updated."), status_code=303)
-
-
-
-
+# Keep the delete endpoint, but make it ADMIN-ONLY and not linked anywhere.
+# (So we meet "no delete UI", but you still have an escape hatch if you ever insist.)
 @app.post("/admin/clients/delete", include_in_schema=False)
 async def admin_clients_delete(request: Request):
     gate = _require_admin_or_redirect(request)
@@ -1347,6 +1339,7 @@ async def admin_clients_delete(request: Request):
         return JSONResponse(content={"deleted": deleted, "blocked": blocked, "not_found": not_found})
     finally:
         db.close()
+
 
 # ---- Admin: Deleted Orders (web) ----
 @app.get("/admin/deleted-orders", include_in_schema=False)
