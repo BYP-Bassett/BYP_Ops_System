@@ -637,6 +637,14 @@ setVal(els.artist, "");
   // Wire up events
   if (els.searchBtn) els.searchBtn.addEventListener("click", () => runSearch(true));
 if (els.clearBtn) els.clearBtn.addEventListener("click", () => clearFilters());
+  // Force Clear to re-run search on next tick (avoids "clears UI but no refresh")
+  document.addEventListener("click", (e) => {
+    const t = e.target && e.target.closest ? e.target.closest("#clearBtn") : null;
+    if (!t) return;
+    try { Promise.resolve().then(() => runSearch(true)); } catch (_) {}
+    try { setTimeout(() => { try { runSearch(true); } catch (_) {} }, 50); } catch (_) {}
+  });
+
 // ----- New Order (web-only) -----
   // Minimal create flow: Artist + Asset Type required (per OpenAPI OrderCreate). Optional notes + client fields.
   // Keep in sync with desktop GUI REP_FULL (source of truth for now)
