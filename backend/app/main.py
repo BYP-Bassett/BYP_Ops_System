@@ -77,6 +77,11 @@ from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, JSON
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 
+try:
+    from sqlalchemy import text as sql_text
+except Exception:  # pragma: no cover
+    sql_text = None
+
 from app.routes.orders import router as orders_router
 
 # DB / models (for auth)
@@ -90,6 +95,48 @@ from app.models.clients import Client
 app = FastAPI()
 
 
+
+def ensure_orders_timestamp_columns() -> None:
+    """Ensure orders.created_at and orders.updated_at exist in SQLite and are backfilled."""
+    if sql_text is None:
+        return
+    db = None
+    try:
+        db = SessionLocal()
+        cols = []
+        try:
+            rows = db.execute(sql_text("PRAGMA table_info(orders)")).fetchall()
+            cols = [r[1] for r in rows]  # (cid, name, type, notnull, dflt_value, pk)
+        except Exception:
+            return
+
+        changed = False
+        if "created_at" not in cols:
+            db.execute(sql_text("ALTER TABLE orders ADD COLUMN created_at TEXT"))
+            changed = True
+        if "updated_at" not in cols:
+            db.execute(sql_text("ALTER TABLE orders ADD COLUMN updated_at TEXT"))
+            changed = True
+
+        if changed:
+            db.commit()
+
+        # Backfill blanks so the UI has something to show.
+        db.execute(sql_text("UPDATE orders SET created_at = COALESCE(created_at, datetime('now'))"))
+        db.execute(sql_text("UPDATE orders SET updated_at = COALESCE(updated_at, created_at, datetime('now'))"))
+        db.commit()
+    except Exception as e:
+        try:
+            print("WARN: ensure_orders_timestamp_columns failed:", e)
+        except Exception:
+            pass
+    finally:
+        try:
+            if db is not None:
+                db.close()
+        except Exception:
+            pass
+
 # ---- SQLite schema patch-ups (dev only) ----
 # If you add new columns, SQLite won't magically learn them.
 # This keeps your local dev DB from face-planting.
@@ -97,6 +144,7 @@ app = FastAPI()
 def _startup_migrate_sqlite_schema() -> None:
     try:
         migrate_sqlite_schema()
+        ensure_orders_timestamp_columns()
     except Exception as e:
         # Don't block server start in dev; you'll see the error in console.
         print("WARN: migrate_sqlite_schema failed:", e)
@@ -1561,6 +1609,12 @@ def orders_admin_detail(request: Request, order_id: int):
 
     def _dt(x):
         try:
+            if x is None:
+                return None
+            # SQLite often returns timestamps as TEXT; don't blank them out.
+            if isinstance(x, str):
+                s = x.strip()
+                return s if s else None
             return x.isoformat() if x else None
         except Exception:
             return None
@@ -1636,7 +1690,7 @@ def orders_admin_detail(request: Request, order_id: int):
             "notes": _safe(o, "notes"),
             "status": _safe(o, "status"),
             "created_at": _dt(_safe(o, "created_at")),
-            "updated_at": _dt(_safe(o, "updated_at")),
+            "updated_at": _dt(_safe(o, "updated_at") or _safe(o, "created_at")),
             "finalized_at": _dt(_safe(o, "finalized_at")),
             "trello_card_id": _safe(o, "trello_card_id"),
             "is_deleted": bool(_safe(o, "is_deleted")),
@@ -1813,7 +1867,6 @@ def web_order_detail(request: Request, order_id: int):
     <div class="card">
       <h2>Order</h2>
       <table><tbody id="orderRows"></tbody></table>
-      <div class="hint">Editable here: <b>Asset Type</b> (draft only), <b>Notes</b></div>
     </div>
 
     <div class="card">
@@ -1995,7 +2048,23 @@ var orderRows = document.getElementById("orderRows");
         tbody.appendChild(tr);
       }
 
-      function addInputRow(tbody, label, id, kind) {
+      
+      function fmtMDY(v){
+        if (!v) return "";
+        try{
+          // Allow ISO strings (with or without timezone)
+          var d = (v instanceof Date) ? v : new Date(String(v));
+          if (isNaN(d.getTime())) return String(v);
+          var mm = String(d.getMonth() + 1).padStart(2, "0");
+          var dd = String(d.getDate()).padStart(2, "0");
+          var yyyy = String(d.getFullYear());
+          return mm + "/" + dd + "/" + yyyy;
+        }catch(e){
+          return String(v);
+        }
+      }
+
+function addInputRow(tbody, label, id, kind) {
         var tr = document.createElement("tr");
 
         var th = document.createElement("th");
@@ -2538,8 +2607,8 @@ function load() {
             notesInput = addInputRow(orderRows, "Notes", "editNotes", "textarea");
 
             addRow(orderRows, "Deleted?", data.is_deleted);
-            addRow(orderRows, "Created", data.created_at);
-            addRow(orderRows, "Updated", data.updated_at);
+            addRow(orderRows, "Created", fmtMDY(data.created_at));
+            addRow(orderRows, "Updated", fmtMDY(data.updated_at));
 
             // ----- SP section -----
             var spObj;
@@ -2879,8 +2948,6 @@ function fetchClientSuggest(q) {
             clientNameInput.addEventListener("focus", function(){ onClientNameTyping(); });
             clientNameInput.addEventListener("blur", function(){ setTimeout(hideClientSuggest, 150); });
 
-            addRow(clientRows, "Client Email", data.client_email);
-            addRow(clientRows, "Client Phone", data.client_phone);
 
             // ----- Rep section -----
             renderSection(repRows, data, [

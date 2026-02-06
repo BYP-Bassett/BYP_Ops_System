@@ -1211,7 +1211,7 @@ def restore_deleted_order(
     return {"status": "restored", "id": order_id}
 
 
-@router.get("/{order_id}", response_model=OrderResponse)
+@router.get("/{order_id}")
 def get_order(
     request: Request,
     order_id: int,
@@ -1238,9 +1238,74 @@ def get_order(
     # FM-style convenience label (non-editable)
     order.parent_display = _parent_display(order)
 
-    return order
+    # Build explicit payload so we can include created_at/updated_at even if the shared OrderResponse schema
+    # doesn't list them yet (FastAPI would otherwise drop them).
+    sp_number = None
+    try:
+        sp_number = order.sp.sp_number if getattr(order, "sp", None) else None
+    except Exception:
+        sp_number = None
 
+    def _iso(v):
+        try:
+            if v is None:
+                return None
+            if isinstance(v, str):
+                s = v.strip()
+                return s if s else None
+            return v.isoformat()
+        except Exception:
+            return None
 
+    return {
+        "id": getattr(order, "id", None),
+        "artist": getattr(order, "artist", None),
+        "asset_type": getattr(order, "asset_type", None),
+        "notes": getattr(order, "notes", None),
+
+        "sp_id": getattr(order, "sp_id", None),
+        "sp_number": sp_number,
+
+        "order_type": getattr(order, "order_type", None),
+        "description": getattr(order, "description", None),
+        "length": getattr(order, "length", None),
+        "instructions": getattr(order, "instructions", None),
+
+        "is_revision": getattr(order, "is_revision", None),
+        "parent_order_id": getattr(order, "parent_order_id", None),
+        "revision_of": getattr(order, "revision_of", None),
+
+        "client_id": getattr(order, "client_id", None),
+        "client_name": getattr(order, "client_name", None),
+        "client_company_name": getattr(order, "client_company_name", None),
+
+        "rep_name": getattr(order, "rep_name", None),
+        "rep_code": getattr(order, "rep_code", None),
+
+        "status": getattr(order, "status", None),
+        "finalized_at": _iso(getattr(order, "finalized_at", None)),
+
+        "trello_card_id": getattr(order, "trello_card_id", None),
+        "trello_checklist_id": getattr(order, "trello_checklist_id", None),
+
+        "is_deleted": getattr(order, "is_deleted", None),
+        "deleted_at": getattr(order, "deleted_at", None),
+        "deleted_by": getattr(order, "deleted_by", None),
+
+        "created_at": _iso(getattr(order, "created_at", None)),
+        "updated_at": _iso(getattr(order, "updated_at", None)),
+
+        "created_by_user_id": getattr(order, "created_by_user_id", None),
+        "updated_by_user_id": getattr(order, "updated_by_user_id", None),
+        "deleted_by_user_id": getattr(order, "deleted_by_user_id", None),
+
+        "art_number": getattr(order, "art_number", None),
+        "po_number": getattr(order, "po_number", None),
+        "billing_info": getattr(order, "billing_info", None),
+
+        # FM-style convenience label (non-editable)
+        "parent_display": getattr(order, "parent_display", None),
+    }
 @router.delete("/{order_id}")
 def delete_order(
     request: Request,
