@@ -997,6 +997,7 @@ def clients_page(request: Request, msg: str | None = None, err: str | None = Non
 
       <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
         <button id="saveBtn" type="button" disabled>Save</button>
+        <button id="printBtn" type="button" onclick="try{{window.open(\'/order/__ORDER_ID__/print?autoprint=1\',\'_blank\',\'noopener\');}}catch(e){{location.href=\'/order/__ORDER_ID__/print?autoprint=1\';}}">Print</button>
         <button id="clearBtn" type="button">Clear</button>
         <span class="muted" id="editMsg"></span>
       </div>
@@ -1021,7 +1022,9 @@ window.__CLIENTS_BOOTSTRAP__ = __CLIENTS_BOOTSTRAP_JSON__;
   var editCompanyEl = document.getElementById("editCompany");
   var editActiveEl = document.getElementById("editActive");
   var saveBtn = document.getElementById("saveBtn");
-  var clearBtn = document.getElementById("clearBtn");
+  
+      var printBtn = document.getElementById("printBtn");
+      var printBtn = document.getElementById("printBtn");var clearBtn = document.getElementById("clearBtn");
   var editMsg = document.getElementById("editMsg");
 
   var items = [];
@@ -1221,7 +1224,19 @@ window.__CLIENTS_BOOTSTRAP__ = __CLIENTS_BOOTSTRAP_JSON__;
       body: form,
       credentials: "same-origin"
     })
-    .then(function(res){ return res.text().then(function(t){ return {ok:res.ok, status:res.status, text:t}; }); })
+    .then(function(res){ return res.text().then(function(t){ return {ok:res.ok, status:res.status, text:t}; });
+      try {
+        if (printBtn) {
+          printBtn.addEventListener("click", function() {
+            try {
+              window.open("/order/" + encodeURIComponent(ORDER_ID) + "/print?autoprint=1", "_blank", "noopener");
+            } catch (e) {
+              window.location.href = "/order/" + encodeURIComponent(ORDER_ID) + "/print?autoprint=1";
+            }
+          });
+        }
+      } catch (e) { /* ignore */ }
+ })
     .then(function(r){
       if (!r.ok){
         editMsg.textContent = "HTTP " + r.status;
@@ -1849,6 +1864,7 @@ def web_order_detail(request: Request, order_id: int):
     </span>
 
     <button id="saveBtn" type="button" disabled>Save</button>
+    <button id="printBtn" type="button" onclick="try{window.open(\'/order/__ORDER_ID__/print?autoprint=1\',\'_blank\',\'noopener\');}catch(e){location.href=\'/order/__ORDER_ID__/print?autoprint=1\';}">Print</button>
     <button id="resetBtn" type="button" disabled>Reset</button>
 
     <button id="finalizeBtn" type="button" disabled>Finalize</button>
@@ -1877,7 +1893,6 @@ def web_order_detail(request: Request, order_id: int):
     <div class="card">
       <h2>Client</h2>
       <table><tbody id="clientRows"></tbody></table>
-      <div class="hint">Editable here: <b>Client Name</b>, <b>Client Company</b></div>
     </div>
 
     <div class="card">
@@ -1903,6 +1918,7 @@ def web_order_detail(request: Request, order_id: int):
       var errEl = document.getElementById("error");
 
       var saveBtn = document.getElementById("saveBtn");
+      var printBtn = document.getElementById("printBtn");
       var resetBtn = document.getElementById("resetBtn");
       var finalizeBtn = document.getElementById("finalizeBtn");
       var unfinalizeBtn = document.getElementById("unfinalizeBtn");
@@ -1995,6 +2011,18 @@ var orderRows = document.getElementById("orderRows");
                 return null;
               }
             });
+      try {
+        if (printBtn) {
+          printBtn.addEventListener("click", function() {
+            try {
+              window.open("/order/" + encodeURIComponent(ORDER_ID) + "/print?autoprint=1", "_blank", "noopener");
+            } catch (e) {
+              window.location.href = "/order/" + encodeURIComponent(ORDER_ID) + "/print?autoprint=1";
+            }
+          });
+        }
+      } catch (e) { /* ignore */ }
+
           })
           .then(function(data) {
             setBusy("");
@@ -2239,7 +2267,9 @@ function addInputRow(tbody, label, id, kind) {
         if (isDraftNow) {
           // Keep Save enabled for draft orders (even if nothing changed yet).
           saveBtn.disabled = false;
-        } else {
+        
+          if (printBtn) printBtn.disabled = false;
+} else {
           saveBtn.disabled = true;
         }
         resetBtn.disabled = !dirty;
@@ -3026,6 +3056,246 @@ function fetchClientSuggest(q) {
     html = html.replace("__ORDER_ID__", str(order_id))
     return HTMLResponse(content=html)
 
+
+@app.get("/order/{order_id}/print", include_in_schema=False)
+def web_order_print(request: Request, order_id: int):
+    # If not logged in, send to login.
+    if not request.session.get("username"):
+        return RedirectResponse(url="/login", status_code=303)
+
+    db = SessionLocal()
+    try:
+        o = db.query(Order).filter(Order.id == order_id).first()
+        if not o:
+            return HTMLResponse("<h1>Order not found</h1>", status_code=404)
+
+        def fmt_mdy(dt):
+            try:
+                if not dt:
+                    return ""
+                if isinstance(dt, str):
+                    d = dt.split("T")[0].strip()
+                    parts = d.split("-")
+                    if len(parts) == 3:
+                        yyyy, mm, dd = parts
+                        return f"{mm}/{dd}/{yyyy}"
+                    return dt
+                return dt.strftime("%m/%d/%Y")
+            except Exception:
+                try:
+                    return str(dt)
+                except Exception:
+                    return ""
+
+        created = fmt_mdy(getattr(o, "created_at", None))
+
+        # Minimal, stable print layout. Created date only + editable billing/notes box.
+        artist = _html_escape(str(getattr(o, "artist", "") or ""))
+        asset = _html_escape(str(getattr(o, "asset_type", "") or ""))
+        status = _html_escape(str(getattr(o, "status", "") or ""))
+        rep = _html_escape(str(getattr(o, "rep_name", "") or getattr(o, "rep_code", "") or ""))
+        sp_number = _html_escape(str(
+            (getattr(o, "sp_number", None) or "")
+            or (getattr(o, "sp", None) if isinstance(getattr(o, "sp", None), str) else "")
+            or (getattr(getattr(o, "sp", None), "sp_number", None) or "")
+            or (getattr(o, "sp_num", None) or "")
+            or ""
+        ))
+        client_name = _html_escape(str(getattr(o, "client_name", "") or ""))
+        def _coerce_company(val):
+            try:
+                if not val:
+                    return ""
+                # If it's an ORM object, try common name-ish attrs
+                for attr in ("company", "company_name", "name", "title"):
+                    try:
+                        v = getattr(val, attr, None)
+                        if v:
+                            return str(v)
+                    except Exception:
+                        pass
+                return str(val)
+            except Exception:
+                return ""
+
+        client_company = _html_escape(str(
+            (getattr(o, "client_company", None) or "")
+            or (getattr(o, "company", None) or "")
+            or (getattr(o, "company_name", None) or "")
+            or (getattr(o, "client_company_name", None) or "")
+            or ""
+        ))
+        if not client_company:
+            client_company = _html_escape(_coerce_company(getattr(o, "company", None)))
+
+        if not client_company:
+            client_company = _html_escape(client_name)
+
+        notes = _html_escape(str(getattr(o, "notes", "") or ""))
+
+        # Billing fields are intentionally NOT saved back to the order.
+        # Everything on the page is editable for print-only tweaks.
+        html = f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Print Order {order_id}</title>
+  <style>
+    @page {{ size: letter; margin: 0.5in; }}
+    html, body {{ height: 100%; }}
+    body {{ font-family: Arial, Helvetica, sans-serif; margin: 0; color: #111; }}
+
+    /* One-page lock */
+    .page {{
+      height: 10in; /* 11in - 0.5in top - 0.5in bottom */
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }}
+
+    .title {{ font-size: 20pt; font-weight: 700; margin: 0; }}
+
+    .gridTop {{
+      display: grid;
+      grid-template-columns: 44% 56%;
+      gap: 12px;
+      align-items: stretch;
+    }}
+
+    .box {{ border: 2px solid #333; padding: 10px; overflow: hidden; }}
+    .box.tight {{ padding: 8px 10px; }}
+    .row {{ display: grid; grid-template-columns: 110px 1fr; gap: 10px; margin: 6px 0; }}
+    .lbl {{ font-weight: 700; }}
+    .mono {{ font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }}
+
+    .editable {{
+      border-bottom: 1px dotted #777;
+      padding: 1px 2px;
+      min-height: 16px;
+      outline: none;
+      white-space: pre-wrap;
+    }}
+    .editable.boxfill {{ border: none; padding: 0; min-height: 0; }}
+
+    /* Billing box MUST NOT expand */
+    .billingBox {{
+      height: 2.35in;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }}
+    .poRow {{ display:flex; gap:10px; align-items:center; margin-bottom:8px; }}
+    .poLabel {{ font-weight:700; }}
+    .poField {{
+      flex: 1;
+      min-height: 22px;
+      border: 1px solid #777;
+      padding: 4px 6px;
+      outline: none;
+    }}
+    .billFill {{
+      flex: 1;
+      border: none;
+      outline: none;
+      white-space: pre-wrap;
+      overflow: hidden; /* truncate */
+    }}
+
+    .artistLine {{
+      border: 2px solid #333;
+      padding: 10px;
+      display: grid;
+      grid-template-columns: 110px 1fr;
+      gap: 10px;
+      align-items: start;
+      overflow: hidden;
+    }}
+
+    /* Notes fills the rest and is 2-column flowing left->right */
+    .notesBox {{
+      border: 2px solid #333;
+      padding: 10px;
+      overflow: hidden;
+      flex: 1;
+    }}
+    .notesContent {{
+      height: 100%;
+      overflow: hidden; /* truncate */
+      white-space: pre-wrap;
+      outline: none;
+      margin: 0;
+      padding: 0;
+      column-count: 2;
+      column-gap: 16px;
+      column-rule: 4px solid #000;
+      column-fill: auto;
+    }}
+
+    .muted {{ color: #666; font-size: 10pt; }}
+    .noprint {{ }}
+    @media print {{
+      .noprint {{ display: none; }}
+    }}
+  </style>
+</head>
+<body>
+  <div class="noprint muted" style="margin-bottom:8px;">
+    Tip: You can edit any field for billing purposes before printing. (These edits do not save back to the order.)
+  </div>
+
+  <div class="page">
+    <div class="title"><span class="editable boxfill" contenteditable="true">{client_company}</span></div>
+
+    <div class="gridTop">
+      <div>
+        <div class="box tight">
+          <div class="row"><div class="lbl">Created</div><div class="mono"><span class="editable boxfill" contenteditable="true">{created}</span></div></div>
+          <div class="row"><div class="lbl">Rep</div><div><span class="editable boxfill" contenteditable="true">{rep}</span></div></div>
+          <div class="row"><div class="lbl">Client</div><div><span class="editable boxfill" contenteditable="true">{client_name}</span></div></div>
+          <div class="row"><div class="lbl">Company</div><div><span class="editable boxfill" contenteditable="true">{client_company}</span></div></div>
+        </div>
+
+        <div class="box tight" style="margin-top:12px;">
+          <div class="row"><div class="lbl">SP#</div><div class="mono"><span class="editable boxfill" contenteditable="true">{sp_number}</span></div></div>
+          <div class="row"><div class="lbl">Asset Type</div><div><span class="editable boxfill" contenteditable="true">{asset}</span></div></div>
+        </div>
+      </div>
+
+      <div class="box billingBox">
+        <div class="poRow">
+          <div class="poLabel">PO#</div>
+          <div id="poField" class="poField" contenteditable="true"></div>
+        </div>
+        <div id="billingFill" class="billFill" contenteditable="true"></div>
+      </div>
+    </div>
+
+    <div class="artistLine">
+      <div class="lbl">Artist</div>
+      <div><span class="editable boxfill" contenteditable="true">{artist}</span></div>
+    </div>
+
+    <div class="notesBox">
+      <div class="notesContent mono" contenteditable="true">{notes}</div>
+    </div>
+  </div>
+
+  <script>
+    (function() {{
+      try {{
+        const p = new URLSearchParams(window.location.search);
+        if (p.get("autoprint") === "1") {{
+          setTimeout(() => window.print(), 350);
+        }}
+      }} catch (_) {{}}
+    }})();
+  </script>
+</body>
+</html>"""
+        return HTMLResponse(html)
+    finally:
+        db.close()
 
 @app.get("/health")
 def health():

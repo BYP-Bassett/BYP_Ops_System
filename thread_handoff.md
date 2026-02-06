@@ -1,45 +1,42 @@
-# Thread Handoff — SP Order System Thread #31 Reset
+# thread_handoff.md — SP Order System — Next Thread Kickoff
 
-**Date:** 2026-02-03 (America/Chicago)
+## Starting Point
+- Latest stable tag: **savepoint-order-created-updated-mdy-2026-02-06**
+- Prior stable tag: **savepoint-clear-refresh-fixed-2026-02-05**
 
-## Why reset
-Thread #31 turned into whack-a-mole because Clients page patches repeatedly:
-- overwrote unrelated routes in `app/main.py`
-- broke Search page ("Not Found")
-- changed styling/layout unintentionally
-- caused “Show inactive” to throw 422 parsing errors
+## What’s Verified Working
+- Sessions/cookies OK; inactive users kicked server-side
+- Search page stable; toolbar layout correct and must not be moved in JS
+- Clients page stable for admin + non-admin (active-only default, show inactive OK, active checkbox persists, edits persist)
+- Search improvements working:
+  - Artist: one-line ellipsis + tooltip
+  - Notes: first-line ellipsis + tooltip
+  - Clear: forces re-run search and reloads All orders
+- Order page shows timestamps:
+  - Created + Updated visible
+  - Format: MM/DD/YYYY
+  - Removed “Editable here…” hint line
+  - Removed Client Email/Phone display rows
 
-We are freezing scope: preserve baseline, patch Clients surgically.
+## Key Technical Notes
+- Order page fetches order data from **`/orders/{id}`** (API).
+- `/orders/{id}` previously used `response_model=OrderResponse` which dropped timestamps; now endpoint returns explicit payload including `created_at` and `updated_at`.
+- Avoid JS toolbar rearrangement — breaks buttons and causes silent failures.
 
-## Baseline to preserve
-- Tag: `savepoint-art-number-added-2026-02-02`
-- Search page + toolbar layout must remain unchanged.
+## Canonical Rules
+- One change at a time
+- No manual file editing
+- User uploads file(s) → assistant returns downloadable replacement with same filename
+- No renaming files
+- Windows only
+- Desktop work forbidden until web is finished
 
-## Current state
-- User restored `app/main.py` to baseline and uploaded it for surgical patching.
+## Next Task (Do First)
+### Re-add Print Feature (Minimal + Stable)
+1) Add route: `GET /order/{order_id}/print`
+2) Add a Print link/button per order row (opens new tab)
+3) Print page: include **Created date only**, keep layout one-page and stable
 
-## Single focus next
-Fix `/admin/clients` to meet requirements:
-- users can view clients (login required)
-- show inactive works (no 422 on include_inactive)
-- per-row active checkbox toggles and persists
-- edit client/company + save
-- remove delete UI
-- do NOT break Search page/layout
-
-## Files involved
-- `app/main.py` (primary)
-- `app/web/app.js` (only if absolutely necessary; avoid touching)
-
-## Safe workflow
-1) Apply one replacement file.
-2) Restart server.
-3) Test Clients page + Search page.
-4) If fail: revert immediately.
-
-## Quick verification commands
-From `C:\BYP_Ops_System\backend`:
-- `git status`
-- `git rev-parse --short HEAD`
-- `git describe --tags --exact-match`
-- `.\venv\Scripts\python.exe -c "import app.main; print(app.main.__file__)"`
+## Expected Files to Work On Next
+- `app/web/app.js` (add Print link/button in order list render; no toolbar changes)
+- `app/main.py` (add print route/template)

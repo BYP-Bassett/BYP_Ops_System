@@ -299,6 +299,9 @@ try { document.addEventListener('DOMContentLoaded', reorderSearchToolbarButtons)
         button.btn-delete:disabled{ opacity: .5; cursor: not-allowed; }
         /* red delete (without assuming any global CSS vars) */
         button.btn-delete{ color: #b00020; border-color: #b00020; }
+        /* One-line + ellipsis for Artist/Notes columns + tooltip shows full */
+        td.col-artist, td.col-notes{ max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        td.col-notes{ max-width: 420px; }
       `;
       document.head.appendChild(st);
     }catch(_e){}
@@ -537,8 +540,8 @@ return p.toString();
         "<td class=\"nowrap\">" + esc(((o.sp && typeof o.sp === "object" && o.sp) ? (o.sp.sp_number || "") : (o.sp_number || ""))) + "</td>" +
         "<td class=\"nowrap\">" + esc(((o.sp && typeof o.sp === "object" && o.sp) ? (o.sp.revision_of || "") : (o.sp_revision_of || o.revision_of || ""))) + "</td>" +
         "<td class=\"nowrap\">" + esc(((o.sp && typeof o.sp === "object" && o.sp) ? (o.sp.additional_version_of || "") : (o.additional_version_of || ""))) + "</td>" +
-        "<td>" + esc(o.artist) + "</td>" +
-        "<td>" + esc(o.notes) + "</td>";
+        "<td class=\"col-artist\" title=\"" + esc(o.artist) + "\">" + esc(String(o.artist ?? "").split(/\r?\n/)[0]) + "</td>" +
+        "<td class=\"col-notes\" title=\"" + esc(o.notes) + "\">" + esc(String(o.notes ?? "").split(/\r?\n/)[0]) + "</td>";
 
       tr.addEventListener("click", () => selectRow(tr, o.id));
       tr.addEventListener("dblclick", () => openDetail(o.id));
@@ -552,6 +555,7 @@ return p.toString();
       try {
         const tdA = document.createElement("td");
         tdA.className = "nowrap";
+
         const delBtn = document.createElement("button");
         delBtn.type = "button";
         delBtn.className = "btn-delete";
