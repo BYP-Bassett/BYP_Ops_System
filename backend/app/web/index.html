@@ -22,7 +22,28 @@
     th, td { padding: 8px; border-bottom: 1px solid #ddd; text-align: left; vertical-align: top; }
     th { font-size: 12px; color: #444; user-select: none; }
     td { font-size: 14px; }
-    .nowrap { white-space: nowrap; }
+    
+    /* --- Fit results to window (no horizontal overflow) --- */
+    table { table-layout: fixed; width: 100%; }
+    th, td { overflow: hidden; text-overflow: ellipsis; }
+    /* Default: keep most columns single-line so widths stay predictable */
+    td { white-space: nowrap; }
+    /* Allow wrap on the two "big text" columns so the table never forces horizontal scroll */
+    td:nth-child(2),  /* Artist */
+    td:nth-child(6),  /* Client Company */
+    td:nth-child(7) { /* Notes */
+      white-space: normal;
+      word-break: break-word;
+    }
+    /* Column width budget (tweakable) */
+    th:nth-child(1), td:nth-child(1) { width: 70px; }   /* ID */
+    th:nth-child(3), td:nth-child(3) { width: 90px; }   /* Asset */
+    th:nth-child(4), td:nth-child(4) { width: 90px; }   /* Status */
+    th:nth-child(5), td:nth-child(5) { width: 70px; }   /* Rep */
+    th:nth-child(2), td:nth-child(2) { width: 18%; }    /* Artist */
+    th:nth-child(6), td:nth-child(6) { width: 20%; }    /* Company */
+    th:nth-child(7), td:nth-child(7) { width: auto; }   /* Notes */
+.nowrap { white-space: nowrap; }
     .small { font-size: 12px; color: #555; }
     .err { color: #b00020; font-weight: 600; }
     .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; }
