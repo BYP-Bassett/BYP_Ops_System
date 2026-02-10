@@ -29,12 +29,16 @@ function reorderSearchToolbarButtons(){
     const btnSearch   = document.getElementById("btnSearch")   || findByText("Search");
     const btnClear    = document.getElementById("btnClear")    || findByText("Clear");
 
-    const btnNewOrder = document.getElementById("btnNewOrder") || findByText("New order");
-    const btnClients  = document.getElementById("btnClients")  || findByText("Clients");
+    const btnNewOrder = document.getElementById("newOrderBtn") || document.getElementById("btnNewOrder") || findByText("New order");
+    const btnNewTour  = document.getElementById("newTourBtn")  || document.getElementById("btnNewTour")  || findByText("New tour");
+    const btnClients  = document.getElementById("clientsBtn") || document.getElementById("btnClients")  || findByText("Clients");
 
     // Admin + Logout often live in the same toolbar row; be flexible
     let btnAdmin  = document.getElementById("btnAdminUsers") || document.getElementById("btnAdmin") || findByText("Admin users") || findByText("Admin");
     let btnLogout = document.getElementById("btnLogout") || findByText("Logout");
+    
+    // CRITICAL: Logout button is inside a <form> - we must move the form, not the button
+    let logoutForm = btnLogout ? btnLogout.closest("form") : null;
 
     const first = btnMyDrafts || btnAll || btnSearch || btnClear || btnNewOrder || btnClients || btnAdmin || btnLogout;
     if (!first) return;
@@ -85,8 +89,9 @@ function reorderSearchToolbarButtons(){
     move(btnSearch, left);
     move(btnClear, left);
 
-    // MIDDLE: New order, Clients
+    // MIDDLE: New order, New Tour, Clients
     move(btnNewOrder, mid);
+    move(btnNewTour, mid);
     move(btnClients, mid);
 
     // RIGHT: Admin (rename to Admin), Logout
@@ -95,7 +100,8 @@ function reorderSearchToolbarButtons(){
       if (norm(btnAdmin.textContent) === "admin users") btnAdmin.textContent = "Admin";
       move(btnAdmin, right);
     }
-    move(btnLogout, right);
+    // Move the logout FORM (not just the button) to keep it functional
+    move(logoutForm, right);
 
     // "Logged in as ..." line ABOVE the toolbar row (right-aligned)
     // Do this once; pull info from /me if available
@@ -175,6 +181,52 @@ function ensureClientsButton() {
 
 try { ensureClientsButton(); } catch (_) {}
 try { document.addEventListener('DOMContentLoaded', ensureClientsButton); } catch (_) {}
+
+// ----- UI: Ensure a "New Tour" button exists on the Search page.
+function ensureNewTourButton() {
+  try {
+    // If we already have a New Tour button, don't create another
+    let newTourBtn = document.getElementById("newTourBtn");
+    if (newTourBtn) return;
+
+    // Try to find the middle group where New Order and Clients live
+    const group = document.getElementById("searchToolbarMidGroup");
+    
+    // Use an existing toolbar button as styling reference
+    const sampleBtn =
+      document.getElementById("newOrderBtn") ||
+      document.getElementById("clientsBtn") ||
+      document.getElementById("myDraftsBtn") ||
+      document.getElementById("allBtn");
+
+    newTourBtn = document.createElement("button");
+    newTourBtn.type = "button";
+    newTourBtn.id = "newTourBtn";
+    newTourBtn.textContent = "New Tour";
+    if (sampleBtn && sampleBtn.className) newTourBtn.className = sampleBtn.className;
+
+    // Place it in the middle group (between New Order and Clients)
+    if (group) {
+      // Try to insert after New Order button if it exists
+      const newOrderBtn = document.getElementById("newOrderBtn");
+      if (newOrderBtn && newOrderBtn.parentElement === group) {
+        group.insertBefore(newTourBtn, newOrderBtn.nextSibling);
+      } else {
+        group.appendChild(newTourBtn);
+      }
+    } else if (sampleBtn && sampleBtn.parentElement) {
+      sampleBtn.parentElement.appendChild(newTourBtn);
+    } else {
+      document.body.appendChild(newTourBtn); // last resort
+    }
+
+    // Wire the click handler to open the New Tour modal
+    newTourBtn.addEventListener("click", () => showNewTourModal());
+  } catch (_) {}
+}
+
+try { ensureNewTourButton(); } catch (_) {}
+try { document.addEventListener('DOMContentLoaded', ensureNewTourButton); } catch (_) {}
 
 try { reorderSearchToolbarButtons(); } catch (_) {}
 try { document.addEventListener('DOMContentLoaded', reorderSearchToolbarButtons); } catch (_) {}
@@ -652,13 +704,7 @@ if (els.clearBtn) els.clearBtn.addEventListener("click", () => clearFilters());
 // ----- New Order (web-only) -----
   // Minimal create flow: Artist + Asset Type required (per OpenAPI OrderCreate). Optional notes + client fields.
   // Keep in sync with desktop GUI REP_FULL (source of truth for now)
-  const REP_FULL = [
-    "SB - Steve Bassett",
-    "RM - Ron Mewis",
-    "AML - Allison Lineberry",
-    "JS - Jon Shults",
-    "CD - Celine DeLeon",
-  ];
+  // REP_FULL removed - now fetched from DB via /api/reps
 
   function repCodeFromFull(repFull) {
     const s = String(repFull || "").trim();
@@ -666,17 +712,69 @@ if (els.clearBtn) els.clearBtn.addEventListener("click", () => clearFilters());
     return (s.split(/\s+/)[0] || "").trim();
   }
 
-  function populateRepSelect(sel) {
+  async function populateRepSelect(sel) {
     if (!sel) return;
-    sel.innerHTML = "";
-    for (const r of REP_FULL) {
+    
+    try {
+      // Fetch current user info and reps list in parallel
+      const [meResp, repsResp] = await Promise.all([
+        fetch("/me", { method: "GET" }),
+        fetch("/api/reps", { method: "GET" })
+      ]);
+      
+      if (!meResp.ok || !repsResp.ok) {
+        throw new Error("Failed to load rep data");
+      }
+      
+      const meData = await meResp.json();
+      const repsData = await repsResp.json();
+      
+      // Clear and populate dropdown
+      sel.innerHTML = "";
+      
+      if (!repsData || repsData.length === 0) {
+        const opt = document.createElement("option");
+        opt.value = "";
+        opt.textContent = "(no reps available)";
+        sel.appendChild(opt);
+        return;
+      }
+      
+      // Build options in format: "CODE - Name"
+      let matchedValue = null;
+      for (const rep of repsData) {
+        const repCode = String(rep.rep_code || "").trim();
+        const repName = String(rep.rep_name || "").trim();
+        const fullText = repCode && repName ? `${repCode} - ${repName}` : (repCode || repName || rep.username || "");
+        
+        const opt = document.createElement("option");
+        opt.value = fullText;
+        opt.textContent = fullText;
+        opt.dataset.userId = rep.id;
+        opt.dataset.repCode = repCode;
+        sel.appendChild(opt);
+        
+        // Try to match logged-in user (prefer user_id, fallback to rep_code)
+        if (meData && meData.authenticated) {
+          if (rep.id === meData.user_id) {
+            matchedValue = fullText;
+          } else if (!matchedValue && repCode && repCode === meData.rep_code) {
+            matchedValue = fullText;
+          }
+        }
+      }
+      
+      // Auto-select the matched rep, or default to first
+      sel.value = matchedValue || (repsData.length > 0 ? sel.options[0].value : "");
+      
+    } catch (err) {
+      console.error("Error loading reps:", err);
+      sel.innerHTML = "";
       const opt = document.createElement("option");
-      opt.value = r;
-      opt.textContent = r;
+      opt.value = "";
+      opt.textContent = "(failed to load reps)";
       sel.appendChild(opt);
     }
-    // default
-    sel.value = REP_FULL[0] || "";
   }
 
   function populateAssetSelect(sel) {
@@ -783,7 +881,7 @@ if (els.clearBtn) els.clearBtn.addEventListener("click", () => clearFilters());
     document.head.appendChild(style);
   }
 
-  function showNewOrderModal() {
+  async function showNewOrderModal() {
     ensureNewOrderStyles();
 
     const overlay = document.createElement("div");
@@ -1054,7 +1152,7 @@ function onClientNameInput() {
     const createBtn = $m("no_create");
 
     // Populate dropdowns (Rep + Asset) from known lists / existing filter controls
-    populateRepSelect(repEl);
+    await populateRepSelect(repEl);
     populateAssetSelect(assetEl);
 
     // Default focus
@@ -1188,6 +1286,633 @@ createBtn.addEventListener("click", create);
 
     // Focus first input
     artistEl.focus();
+  }
+
+  // ----- New Tour Modal (creates multiple orders at once) -----
+  async function showNewTourModal() {
+    ensureNewOrderStyles();
+
+    const overlay = document.createElement("div");
+    overlay.className = "byp-modal-overlay";
+    overlay.tabIndex = -1;
+
+    const modal = document.createElement("div");
+    modal.className = "byp-modal";
+
+    modal.innerHTML = `
+      <h3>Create Tour</h3>
+
+      <div class="byp-row">
+        <label for="nt_rep">Rep *</label>
+        <select id="nt_rep"></select>
+      </div>
+
+      <div class="byp-row">
+        <label for="nt_client_name">Client Name *</label>
+        <div style="position:relative;">
+          <input id="nt_client_name" type="text" placeholder="Client name" autocomplete="new-password" />
+          <input id="nt_client_id" type="hidden" />
+          <div id="nt_client_suggest" class="byp-suggest"></div>
+        </div>
+      </div>
+
+      <div class="byp-row">
+        <label for="nt_client_company">Company Name *</label>
+        <div style="position:relative;">
+          <input id="nt_client_company" type="text" placeholder="Company name" autocomplete="new-password" />
+          <div id="nt_company_suggest" class="byp-suggest"></div>
+        </div>
+      </div>
+
+      <div class="byp-row">
+        <label for="nt_artist">Artist *</label>
+        <div style="position:relative;">
+          <input id="nt_artist" type="text" placeholder="Artist name" />
+          <div id="nt_artist_suggest" class="byp-suggest"></div>
+        </div>
+      </div>
+
+      <div class="byp-row">
+        <label>Asset Types * (select at least one)</label>
+        <div style="display: flex; gap: 16px; align-items: center; padding: 8px 0;">
+          <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
+            <input type="checkbox" id="nt_asset_art" value="art" />
+            <span>Art</span>
+          </label>
+          <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
+            <input type="checkbox" id="nt_asset_radio" value="radio" />
+            <span>Radio</span>
+          </label>
+          <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
+            <input type="checkbox" id="nt_asset_video" value="video" />
+            <span>Video</span>
+          </label>
+          <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
+            <input type="checkbox" id="nt_asset_other" value="other" />
+            <span>Other</span>
+          </label>
+        </div>
+      </div>
+
+      <div class="byp-hint">* required</div>
+      <div id="nt_err" class="byp-err"></div>
+      <div class="byp-actions">
+        <button id="nt_cancel" type="button">Cancel</button>
+        <button id="nt_create" type="button">Create</button>
+      </div>
+    `;
+
+    overlay.appendChild(modal);
+    document.body.appendChild(overlay);
+
+    const $m = (id) => modal.querySelector("#" + id);
+
+    const repEl = $m("nt_rep");
+    const clientNameEl = $m("nt_client_name");
+    const clientCompanyEl = $m("nt_client_company");
+    const clientIdEl = $m("nt_client_id");
+    const clientSuggestBox = $m("nt_client_suggest");
+    const companySuggestBox = $m("nt_company_suggest");
+    const artistEl = $m("nt_artist");
+    const artistSuggestBox = $m("nt_artist_suggest");
+    const assetArtEl = $m("nt_asset_art");
+    const assetRadioEl = $m("nt_asset_radio");
+    const assetVideoEl = $m("nt_asset_video");
+    const assetOtherEl = $m("nt_asset_other");
+    const errEl = $m("nt_err");
+    const cancelBtn = $m("nt_cancel");
+    const createBtn = $m("nt_create");
+
+    // Populate rep dropdown
+    await populateRepSelect(repEl);
+
+    // --- Client autocomplete (from clients table) ---
+    let clientSuggestTimer = null;
+    let clientSuggestItems = [];
+    let clientSuggestIndex = -1;
+
+    function hideClientSuggest() {
+      if (!clientSuggestBox) return;
+      clientSuggestBox.style.display = "none";
+      clientSuggestBox.innerHTML = "";
+      clientSuggestItems = [];
+      clientSuggestIndex = -1;
+    }
+
+    async function fetchClientSuggest(q) {
+      try {
+        const res = await fetch("/orders/clients/suggest?q=" + encodeURIComponent(q) + "&limit=10", { credentials: "same-origin" });
+        if (!res.ok) return [];
+        const data = await res.json();
+        if (Array.isArray(data)) return data;
+        if (data && Array.isArray(data.value)) return data.value;
+        if (data && Array.isArray(data.items)) return data.items;
+        if (data && Array.isArray(data.results)) return data.results;
+        return [];
+      } catch (_) {
+        return [];
+      }
+    }
+
+    function setClientSuggestActive(idx) {
+      if (!clientSuggestBox) return;
+      const kids = Array.from(clientSuggestBox.querySelectorAll(".byp-suggest-item"));
+      if (!kids.length) { clientSuggestIndex = -1; return; }
+      let n = idx;
+      if (n < 0) n = 0;
+      if (n >= kids.length) n = kids.length - 1;
+
+      kids.forEach((el, i) => {
+        el.style.background = (i === n) ? "#93c5fd" : "transparent";
+        el.style.border = (i === n) ? "1px solid #1d4ed8" : "1px solid transparent";
+        el.style.borderRadius = "8px";
+        el.setAttribute("aria-selected", (i === n) ? "true" : "false");
+      });
+
+      clientSuggestIndex = n;
+      try { kids[n].scrollIntoView({ block: "nearest" }); } catch (_) {}
+    }
+
+    function applyClientSuggestItem(it) {
+      if (!it) return;
+      clientNameEl.value = String(it.client_name || it.name || "").trim();
+      clientCompanyEl.value = String(it.company_name || it.company || "").trim();
+      if (it.id) clientIdEl.value = String(it.id);
+      hideClientSuggest();
+    }
+
+    clientNameEl.addEventListener("input", () => {
+      const q = (clientNameEl.value || "").trim();
+      if (clientSuggestTimer) clearTimeout(clientSuggestTimer);
+      if (!q || q.length < 2) {
+        hideClientSuggest();
+        return;
+      }
+      clientSuggestTimer = setTimeout(async () => {
+        const results = await fetchClientSuggest(q);
+        if (!results || results.length === 0) {
+          hideClientSuggest();
+          return;
+        }
+        clientSuggestItems = results;
+        clientSuggestBox.innerHTML = "";
+        results.forEach((r, i) => {
+          const div = document.createElement("div");
+          div.className = "byp-suggest-item";
+          div.style.padding = "8px";
+          div.style.cursor = "pointer";
+          div.textContent = (r.client_name || r.name || "") + (r.company_name || r.company ? " — " + (r.company_name || r.company) : "");
+          div.addEventListener("click", () => applyClientSuggestItem(r));
+          div.addEventListener("mouseenter", () => setClientSuggestActive(i));
+          clientSuggestBox.appendChild(div);
+        });
+        clientSuggestBox.style.display = "block";
+        setClientSuggestActive(0);
+      }, 300);
+    });
+
+    clientNameEl.addEventListener("keydown", (e) => {
+      if (clientSuggestBox.style.display === "none") return;
+      const kids = Array.from(clientSuggestBox.querySelectorAll(".byp-suggest-item"));
+      if (!kids.length) return;
+
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        setClientSuggestActive(clientSuggestIndex + 1);
+      } else if (e.key === "ArrowUp") {
+        e.preventDefault();
+        setClientSuggestActive(clientSuggestIndex - 1);
+      } else if (e.key === "Enter") {
+        e.preventDefault();
+        if (clientSuggestIndex >= 0 && clientSuggestIndex < clientSuggestItems.length) {
+          applyClientSuggestItem(clientSuggestItems[clientSuggestIndex]);
+        }
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        hideClientSuggest();
+      }
+    });
+
+    clientNameEl.addEventListener("blur", () => {
+      setTimeout(() => hideClientSuggest(), 200);
+    });
+
+    // Double-click to show all clients
+    clientNameEl.addEventListener("dblclick", async () => {
+      const results = await fetchClientSuggest("a"); // fetch with common letter to get many results
+      if (!results || results.length === 0) return;
+      clientSuggestItems = results;
+      clientSuggestBox.innerHTML = "";
+      results.forEach((r, i) => {
+        const div = document.createElement("div");
+        div.className = "byp-suggest-item";
+        div.style.padding = "8px";
+        div.style.cursor = "pointer";
+        div.textContent = (r.client_name || r.name || "") + (r.company_name || r.company ? " — " + (r.company_name || r.company) : "");
+        div.addEventListener("click", () => applyClientSuggestItem(r));
+        div.addEventListener("mouseenter", () => setClientSuggestActive(i));
+        clientSuggestBox.appendChild(div);
+      });
+      clientSuggestBox.style.display = "block";
+      setClientSuggestActive(0);
+      clientNameEl.select(); // Select the text for easy replacement
+    });
+
+    // --- Company autocomplete (from existing orders) ---
+    let companySuggestTimer = null;
+    let companySuggestItems = [];
+    let companySuggestIndex = -1;
+
+    function hideCompanySuggest() {
+      if (!companySuggestBox) return;
+      companySuggestBox.style.display = "none";
+      companySuggestBox.innerHTML = "";
+      companySuggestItems = [];
+      companySuggestIndex = -1;
+    }
+
+    async function fetchCompanySuggest(q) {
+      try {
+        const res = await fetch("/orders/companies/suggest?q=" + encodeURIComponent(q) + "&limit=10", { credentials: "same-origin" });
+        if (!res.ok) return [];
+        const data = await res.json();
+        if (Array.isArray(data)) return data;
+        return [];
+      } catch (_) {
+        return [];
+      }
+    }
+
+    function setCompanySuggestActive(idx) {
+      if (!companySuggestBox) return;
+      const kids = Array.from(companySuggestBox.querySelectorAll(".byp-suggest-item"));
+      if (!kids.length) { companySuggestIndex = -1; return; }
+      let n = idx;
+      if (n < 0) n = 0;
+      if (n >= kids.length) n = kids.length - 1;
+
+      kids.forEach((el, i) => {
+        el.style.background = (i === n) ? "#93c5fd" : "transparent";
+        el.style.border = (i === n) ? "1px solid #1d4ed8" : "1px solid transparent";
+        el.style.borderRadius = "8px";
+        el.setAttribute("aria-selected", (i === n) ? "true" : "false");
+      });
+
+      companySuggestIndex = n;
+      try { kids[n].scrollIntoView({ block: "nearest" }); } catch (_) {}
+    }
+
+    function applyCompanySuggestItem(it) {
+      if (!it) return;
+      clientCompanyEl.value = String(it.company || "").trim();
+      hideCompanySuggest();
+    }
+
+    clientCompanyEl.addEventListener("input", () => {
+      const q = (clientCompanyEl.value || "").trim();
+      if (companySuggestTimer) clearTimeout(companySuggestTimer);
+      if (!q || q.length < 2) {
+        hideCompanySuggest();
+        return;
+      }
+      companySuggestTimer = setTimeout(async () => {
+        const results = await fetchCompanySuggest(q);
+        if (!results || results.length === 0) {
+          hideCompanySuggest();
+          return;
+        }
+        companySuggestItems = results;
+        companySuggestBox.innerHTML = "";
+        results.forEach((r, i) => {
+          const div = document.createElement("div");
+          div.className = "byp-suggest-item";
+          div.style.padding = "8px";
+          div.style.cursor = "pointer";
+          div.textContent = r.company || "";
+          div.addEventListener("click", () => applyCompanySuggestItem(r));
+          div.addEventListener("mouseenter", () => setCompanySuggestActive(i));
+          companySuggestBox.appendChild(div);
+        });
+        companySuggestBox.style.display = "block";
+        setCompanySuggestActive(0);
+      }, 300);
+    });
+
+    clientCompanyEl.addEventListener("keydown", (e) => {
+      if (companySuggestBox.style.display === "none") return;
+      const kids = Array.from(companySuggestBox.querySelectorAll(".byp-suggest-item"));
+      if (!kids.length) return;
+
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        setCompanySuggestActive(companySuggestIndex + 1);
+      } else if (e.key === "ArrowUp") {
+        e.preventDefault();
+        setCompanySuggestActive(companySuggestIndex - 1);
+      } else if (e.key === "Enter") {
+        e.preventDefault();
+        if (companySuggestIndex >= 0 && companySuggestIndex < companySuggestItems.length) {
+          applyCompanySuggestItem(companySuggestItems[companySuggestIndex]);
+        }
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        hideCompanySuggest();
+      }
+    });
+
+    clientCompanyEl.addEventListener("blur", () => {
+      setTimeout(() => hideCompanySuggest(), 200);
+    });
+
+    // Double-click to show all companies
+    clientCompanyEl.addEventListener("dblclick", async () => {
+      const results = await fetchCompanySuggest("a"); // fetch with common letter
+      if (!results || results.length === 0) return;
+      companySuggestItems = results;
+      companySuggestBox.innerHTML = "";
+      results.forEach((r, i) => {
+        const div = document.createElement("div");
+        div.className = "byp-suggest-item";
+        div.style.padding = "8px";
+        div.style.cursor = "pointer";
+        div.textContent = r.company || "";
+        div.addEventListener("click", () => applyCompanySuggestItem(r));
+        div.addEventListener("mouseenter", () => setCompanySuggestActive(i));
+        companySuggestBox.appendChild(div);
+      });
+      companySuggestBox.style.display = "block";
+      setCompanySuggestActive(0);
+      clientCompanyEl.select();
+    });
+
+    // --- Artist autocomplete (from existing orders) ---
+    let artistSuggestTimer = null;
+    let artistSuggestItems = [];
+    let artistSuggestIndex = -1;
+
+    function hideArtistSuggest() {
+      if (!artistSuggestBox) return;
+      artistSuggestBox.style.display = "none";
+      artistSuggestBox.innerHTML = "";
+      artistSuggestItems = [];
+      artistSuggestIndex = -1;
+    }
+
+    async function fetchArtistSuggest(q) {
+      try {
+        const res = await fetch("/orders/artists/suggest?q=" + encodeURIComponent(q) + "&limit=10", { credentials: "same-origin" });
+        if (!res.ok) return [];
+        const data = await res.json();
+        if (Array.isArray(data)) return data;
+        return [];
+      } catch (_) {
+        return [];
+      }
+    }
+
+    function setArtistSuggestActive(idx) {
+      if (!artistSuggestBox) return;
+      const kids = Array.from(artistSuggestBox.querySelectorAll(".byp-suggest-item"));
+      if (!kids.length) { artistSuggestIndex = -1; return; }
+      let n = idx;
+      if (n < 0) n = 0;
+      if (n >= kids.length) n = kids.length - 1;
+
+      kids.forEach((el, i) => {
+        el.style.background = (i === n) ? "#93c5fd" : "transparent";
+        el.style.border = (i === n) ? "1px solid #1d4ed8" : "1px solid transparent";
+        el.style.borderRadius = "8px";
+        el.setAttribute("aria-selected", (i === n) ? "true" : "false");
+      });
+
+      artistSuggestIndex = n;
+      try { kids[n].scrollIntoView({ block: "nearest" }); } catch (_) {}
+    }
+
+    function applyArtistSuggestItem(it) {
+      if (!it) return;
+      artistEl.value = String(it.artist || "").trim();
+      hideArtistSuggest();
+    }
+
+    artistEl.addEventListener("input", () => {
+      const q = (artistEl.value || "").trim();
+      if (artistSuggestTimer) clearTimeout(artistSuggestTimer);
+      if (!q || q.length < 2) {
+        hideArtistSuggest();
+        return;
+      }
+      artistSuggestTimer = setTimeout(async () => {
+        const results = await fetchArtistSuggest(q);
+        if (!results || results.length === 0) {
+          hideArtistSuggest();
+          return;
+        }
+        artistSuggestItems = results;
+        artistSuggestBox.innerHTML = "";
+        results.forEach((r, i) => {
+          const div = document.createElement("div");
+          div.className = "byp-suggest-item";
+          div.style.padding = "8px";
+          div.style.cursor = "pointer";
+          div.textContent = r.artist || "";
+          div.addEventListener("click", () => applyArtistSuggestItem(r));
+          div.addEventListener("mouseenter", () => setArtistSuggestActive(i));
+          artistSuggestBox.appendChild(div);
+        });
+        artistSuggestBox.style.display = "block";
+        setArtistSuggestActive(0);
+      }, 300);
+    });
+
+    artistEl.addEventListener("keydown", (e) => {
+      if (artistSuggestBox.style.display === "none") return;
+      const kids = Array.from(artistSuggestBox.querySelectorAll(".byp-suggest-item"));
+      if (!kids.length) return;
+
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        setArtistSuggestActive(artistSuggestIndex + 1);
+      } else if (e.key === "ArrowUp") {
+        e.preventDefault();
+        setArtistSuggestActive(artistSuggestIndex - 1);
+      } else if (e.key === "Enter") {
+        e.preventDefault();
+        if (artistSuggestIndex >= 0 && artistSuggestIndex < artistSuggestItems.length) {
+          applyArtistSuggestItem(artistSuggestItems[artistSuggestIndex]);
+        }
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        hideArtistSuggest();
+      }
+    });
+
+    artistEl.addEventListener("blur", () => {
+      setTimeout(() => hideArtistSuggest(), 200);
+    });
+
+    // Double-click to show all artists
+    artistEl.addEventListener("dblclick", async () => {
+      const results = await fetchArtistSuggest("a"); // fetch with common letter
+      if (!results || results.length === 0) return;
+      artistSuggestItems = results;
+      artistSuggestBox.innerHTML = "";
+      results.forEach((r, i) => {
+        const div = document.createElement("div");
+        div.className = "byp-suggest-item";
+        div.style.padding = "8px";
+        div.style.cursor = "pointer";
+        div.textContent = r.artist || "";
+        div.addEventListener("click", () => applyArtistSuggestItem(r));
+        div.addEventListener("mouseenter", () => setArtistSuggestActive(i));
+        artistSuggestBox.appendChild(div);
+      });
+      artistSuggestBox.style.display = "block";
+      setArtistSuggestActive(0);
+      artistEl.select();
+    });
+
+    // Default focus
+    setTimeout(() => { try { clientNameEl.focus(); } catch (_) {} }, 0);
+
+    function close() {
+      try { document.body.removeChild(overlay); } catch (_) {}
+    }
+
+    overlay.addEventListener("click", (e) => {
+      if (e.target === overlay) close();
+    });
+
+    cancelBtn.addEventListener("click", close);
+
+    overlay.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") close();
+    });
+
+    async function create() {
+      errEl.textContent = "";
+
+      const rep_full = String(repEl.value || "").trim();
+      const rep_code = repCodeFromFull(rep_full);
+
+      const client_name = String(clientNameEl.value || "").trim();
+      const client_company_name = String(clientCompanyEl.value || "").trim();
+      const artist = String(artistEl.value || "").trim();
+
+      // Collect selected asset types
+      const asset_types = [];
+      if (assetArtEl.checked) asset_types.push("art");
+      if (assetRadioEl.checked) asset_types.push("radio");
+      if (assetVideoEl.checked) asset_types.push("video");
+      if (assetOtherEl.checked) asset_types.push("other");
+
+      // Validation
+      if (!rep_full || !rep_code) {
+        errEl.textContent = "Rep is required.";
+        repEl.focus();
+        return;
+      }
+      if (!client_name) {
+        errEl.textContent = "Client Name is required.";
+        clientNameEl.focus();
+        return;
+      }
+      if (!client_company_name) {
+        errEl.textContent = "Company Name is required.";
+        clientCompanyEl.focus();
+        return;
+      }
+      if (!artist) {
+        errEl.textContent = "Artist is required.";
+        artistEl.focus();
+        return;
+      }
+      if (asset_types.length === 0) {
+        errEl.textContent = "At least one Asset Type must be selected.";
+        return;
+      }
+
+      createBtn.disabled = true;
+      cancelBtn.disabled = true;
+      createBtn.textContent = "Creating…";
+
+      try {
+        // Best-effort: create client if new
+        let client_id = clientIdEl && clientIdEl.value ? Number(clientIdEl.value) : null;
+        if (!client_id && client_name.trim()) {
+          const newId = await ensureClientExists(client_name, client_company_name);
+          if (newId) {
+            client_id = newId;
+            if (clientIdEl) clientIdEl.value = String(newId);
+          }
+        }
+
+        const payload = {
+          artist,
+          status: "draft",
+          rep_name: rep_full,
+          rep_code,
+          client_name,
+          client_company_name,
+          client_id,
+        };
+
+        // Build query string with asset types
+        const assetTypesParam = asset_types.map(at => `asset_types=${encodeURIComponent(at)}`).join("&");
+        const url = `/orders/new-tour?initials=${encodeURIComponent(rep_code)}&${assetTypesParam}`;
+
+        const res = await fetch(url, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+          },
+          body: JSON.stringify(payload),
+        });
+
+        const text = await res.text();
+        if (!res.ok) {
+          throw new Error("HTTP " + res.status + ": " + text);
+        }
+
+        const data = JSON.parse(text);
+
+        if (!data || !data.orders || data.orders.length === 0) {
+          throw new Error("Create succeeded but no orders were returned.");
+        }
+
+        // Force a refresh when returning to search
+        try {
+          sessionStorage.setItem("byp_ops_force_refresh", "1");
+          sessionStorage.setItem("byp_ops_last_created_count", String(data.orders.length));
+        } catch (_) {}
+
+        // Close modal and refresh search page
+        close();
+        saveState();
+        runSearch(false);
+
+      } catch (e) {
+        errEl.textContent = String(e);
+      } finally {
+        createBtn.disabled = false;
+        cancelBtn.disabled = false;
+        createBtn.textContent = "Create";
+      }
+    }
+
+    createBtn.addEventListener("click", create);
+    modal.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !e.shiftKey) {
+        const t = e.target;
+        if (t && t.tagName === "TEXTAREA") return;
+        e.preventDefault();
+        create();
+      }
+    });
+
+    // Focus client name input
+    clientNameEl.focus();
   }
 
   els.prevBtn.addEventListener("click", () => {

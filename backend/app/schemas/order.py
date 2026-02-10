@@ -5,7 +5,7 @@ from __future__ import annotations
 from pydantic import BaseModel, field_validator, ConfigDict
 from typing import Optional
 
-ALLOWED_ASSET_TYPES = {"radio", "video", "art"}
+ALLOWED_ASSET_TYPES = {"radio", "video", "art", "other"}
 ALLOWED_STATUSES = {"draft", "finalized"}
 
 

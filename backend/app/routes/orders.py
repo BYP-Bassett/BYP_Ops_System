@@ -34,6 +34,17 @@ class OrderCreateWithRep(OrderCreate):
     rep_name: str | None = None
     client_id: int | None = None
 
+# Tour creation schema - doesn't require asset_type since it's passed as query params
+class TourCreate(BaseModel):
+    artist: str
+    client_name: str
+    client_company_name: str
+    status: str | None = "draft"
+    notes: str | None = None
+    rep_code: str | None = None
+    rep_name: str | None = None
+    client_id: int | None = None
+
 # Allow rep reassignment on existing (non-finalized) orders via PATCH.
 class OrderUpdateWithRep(OrderUpdate):
     rep_code: str | None = None
@@ -430,7 +441,7 @@ def search_orders(
     db: Session = Depends(get_db),
     artist: str | None = Query(default=None, description="Artist contains (case-insensitive)."),
     notes: str | None = Query(default=None, description="Notes contains (case-insensitive)."),
-    asset_type: str | None = Query(default=None, description="Asset type equals (radio/video/art)."),
+    asset_type: str | None = Query(default=None, description="Asset type equals (radio/video/art/other)."),
     sp_number: str | None = Query(default=None, description="SP number contains (case-insensitive)."),
     client_name: str | None = Query(default=None, description="Client name contains (case-insensitive)."),
     client_company_name: str | None = Query(default=None, description="Client company contains (case-insensitive)."),
@@ -471,7 +482,7 @@ def search_orders2(
     db: Session = Depends(get_db),
     artist: str | None = Query(default=None, description="Artist contains (case-insensitive)."),
     notes: str | None = Query(default=None, description="Notes contains (case-insensitive)."),
-    asset_type: str | None = Query(default=None, description="Asset type equals (radio/video/art)."),
+    asset_type: str | None = Query(default=None, description="Asset type equals (radio/video/art/other)."),
     sp_number: str | None = Query(default=None, description="SP number contains (case-insensitive)."),
     client_name: str | None = Query(default=None, description="Client name contains (case-insensitive)."),
     client_company: str | None = Query(default=None, description="Client company contains (case-insensitive)."),
@@ -546,6 +557,66 @@ def clients_suggest(
         }
         for r in rows
     ]
+
+
+@router.get("/artists/suggest")
+def artists_suggest(
+    request: Request,
+    q: str = Query(..., min_length=1, description="Artist name search."),
+    limit: int = Query(default=10, ge=1, le=50),
+    db: Session = Depends(get_db),
+    session_user: dict = Depends(require_login),
+):
+    """Return distinct artist names matching the query from existing orders."""
+    qq = (q or "").strip()
+    if not qq:
+        return []
+
+    # Case-insensitive contains search on artist field
+    like = f"%{qq}%"
+    
+    # Get distinct artist names, excluding deleted orders
+    artists = (
+        db.query(Order.artist)
+        .filter(Order.artist.ilike(like))
+        .filter(Order.deleted_at.is_(None))
+        .distinct()
+        .order_by(func.lower(Order.artist).asc())
+        .limit(limit)
+        .all()
+    )
+    
+    return [{"artist": a[0]} for a in artists if a[0]]
+
+
+@router.get("/companies/suggest")
+def companies_suggest(
+    request: Request,
+    q: str = Query(..., min_length=1, description="Company name search."),
+    limit: int = Query(default=10, ge=1, le=50),
+    db: Session = Depends(get_db),
+    session_user: dict = Depends(require_login),
+):
+    """Return distinct company names matching the query from existing orders."""
+    qq = (q or "").strip()
+    if not qq:
+        return []
+
+    # Case-insensitive contains search on client_company_name field
+    like = f"%{qq}%"
+    
+    # Get distinct company names, excluding deleted orders
+    companies = (
+        db.query(Order.client_company_name)
+        .filter(Order.client_company_name.ilike(like))
+        .filter(Order.deleted_at.is_(None))
+        .distinct()
+        .order_by(func.lower(Order.client_company_name).asc())
+        .limit(limit)
+        .all()
+    )
+    
+    return [{"company": c[0]} for c in companies if c[0]]
 
 
 @router.get("/clients/{client_id}", response_model=ClientResponse)
@@ -785,6 +856,112 @@ def create_order(
     db.commit()
 
     return created
+
+
+@router.post("/new-tour")
+def create_tour_orders(
+    request: Request,
+    payload: TourCreate,
+    asset_types: list[str] = Query(..., description="List of asset types to create (e.g., ['radio', 'video', 'art'])"),
+    db: Session = Depends(get_db),
+    session_user: dict = Depends(require_login),
+    initials: str | None = Query(default=None, description="Your initials for audit log (optional)."),
+):
+    """
+    Create multiple orders at once (one per asset type) for a tour.
+    Returns list of created order IDs.
+    """
+    if not asset_types or len(asset_types) == 0:
+        raise HTTPException(status_code=400, detail="At least one asset type must be selected")
+    
+    # Validate asset types
+    valid_asset_types = {"radio", "video", "art", "other"}
+    for at in asset_types:
+        if at not in valid_asset_types:
+            raise HTTPException(status_code=400, detail=f"Invalid asset type: {at}. Must be one of: {', '.join(valid_asset_types)}")
+    
+    # Remove duplicates while preserving order
+    unique_asset_types = []
+    seen = set()
+    for at in asset_types:
+        if at not in seen:
+            unique_asset_types.append(at)
+            seen.add(at)
+    
+    created_orders = []
+    
+    for asset_type in unique_asset_types:
+        # Create a copy of the payload for each asset type
+        order_payload = OrderCreateWithRep(
+            artist=payload.artist,
+            asset_type=asset_type,
+            status=payload.status or "draft",
+            client_name=payload.client_name,
+            client_company_name=payload.client_company_name,
+            notes=payload.notes,
+            client_id=getattr(payload, "client_id", None),
+        )
+        
+        # Auto-prepend default boilerplate for NEW radio/video orders
+        default_notes = _default_notes_for_new_order(asset_type, getattr(payload, "notes", None))
+        if default_notes is not None:
+            order_payload.notes = default_notes
+        
+        # Rep assignment (same logic as single order creation)
+        desired_rep_code = (getattr(payload, "rep_code", None) or "").strip() or None
+        desired_rep_name = (getattr(payload, "rep_name", None) or "").strip() or None
+        
+        if not desired_rep_code and desired_rep_name:
+            m = re.match(r"^\s*([A-Za-z0-9]{1,6})\s*[-–—]\s*.+$", desired_rep_name)
+            if m:
+                desired_rep_code = m.group(1).strip().upper()
+        
+        if not desired_rep_code:
+            desired_rep_code = (session_user.get("rep_code") or "").strip().upper() or None
+        if not desired_rep_name:
+            desired_rep_name = (session_user.get("rep_name") or "").strip() or (desired_rep_code or None)
+        
+        if desired_rep_code:
+            desired_rep_code = desired_rep_code.strip().upper()
+        
+        try:
+            setattr(order_payload, "rep_code", desired_rep_code)
+            setattr(order_payload, "rep_name", desired_rep_name)
+        except Exception:
+            pass
+        
+        # Create the order
+        created = create_order_service(db, order_payload)
+        
+        # Reload with SP joined
+        created = (
+            db.query(Order)
+            .options(joinedload(Order.sp))
+            .filter(Order.id == created.id)
+            .first()
+        )
+        
+        # Client snapshot wiring
+        payload_client_id = getattr(payload, "client_id", None)
+        if payload_client_id is not None:
+            try:
+                _apply_client_snapshot(db, created, int(payload_client_id))
+                db.commit()
+                db.refresh(created)
+            except HTTPException:
+                raise
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=f"Failed to apply client snapshot: {e}")
+        
+        _stamp_order_user_ids(created, session_user, created=True)
+        actor = _actor_from_session_or_initials(session_user, initials)
+        _audit(db, action="create", actor=actor, order=created, details={"endpoint": "/orders/new-tour", "tour_asset_types": unique_asset_types})
+        
+        created_orders.append({"id": created.id, "asset_type": asset_type})
+    
+    db.commit()
+    
+    return {"orders": created_orders, "count": len(created_orders)}
 
 
 @router.post("/{order_id}/finalize", response_model=OrderResponse)
@@ -1380,8 +1557,8 @@ def update_order(
     if payload.asset_type is not None and payload.asset_type != order.asset_type:
         old_asset = (getattr(order, "asset_type", "") or "").strip().lower()
         new_asset = (payload.asset_type or "").strip().lower()
-        if new_asset not in {"radio", "video", "art"}:
-            raise HTTPException(status_code=400, detail="asset_type must be one of: radio, video, art")
+        if new_asset not in {"radio", "video", "art", "other"}:
+            raise HTTPException(status_code=400, detail="asset_type must be one of: radio, video, art, other")
 
         is_finalized = (order.status or "draft") == "finalized"
         if is_finalized and not override:
@@ -1390,9 +1567,9 @@ def update_order(
         order.asset_type = new_asset
         touched_fields.append("asset_type")
 
-        # Keep SP order_type in sync ONLY for radio/video.
+        # Keep SP order_type in sync ONLY for radio/video/other.
         # If switching to ART, we intentionally do NOT mutate the SP row; ART orders don't use SP numbers.
-        if new_asset in {"radio", "video"} and getattr(order, "sp", None) is not None:
+        if new_asset in {"radio", "video", "other"} and getattr(order, "sp", None) is not None:
             try:
                 order.sp.order_type = new_asset
             except Exception:
@@ -1407,9 +1584,9 @@ def update_order(
                 pass
 
 
-        # If switching INTO radio/video from ART (or any SP-less state), assign an SP# immediately.
-        # This prevents "Art -> Radio/Video" orders from remaining SP-less forever.
-        if new_asset in {"radio", "video"} and getattr(order, "sp_id", None) is None:
+        # If switching INTO radio/video/other from ART (or any SP-less state), assign an SP# immediately.
+        # This prevents "Art -> Radio/Video/Other" orders from remaining SP-less forever.
+        if new_asset in {"radio", "video", "other"} and getattr(order, "sp_id", None) is None:
             try:
                 sp_rec = generate_next_sp(db, new_asset)
                 order.sp_id = sp_rec.id
@@ -1422,7 +1599,7 @@ def update_order(
             except Exception as e:
                 raise HTTPException(status_code=500, detail=f"Failed to assign SP number: {e}")
 
-        # If switching INTO ART from radio/video, clear any existing SP linkage immediately.
+        # If switching INTO ART from radio/video/other, clear any existing SP linkage immediately.
         # ART orders must NOT carry an SP number. It's fine for sp_id to be blank until (re)finalize.
         if new_asset == "art" and getattr(order, "sp_id", None) is not None:
             try:

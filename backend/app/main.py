@@ -245,7 +245,7 @@ async def _auth_session_guard(request: Request, call_next):
                 _clear_session(request)
 
                 # API endpoints (desktop + web JS fetches) should get a hard 401.
-                if path.startswith("/orders") or path == "/me":
+                if path.startswith("/orders") or path == "/me" or path.startswith("/api/"):
                     return JSONResponse(status_code=401, content={"detail": "Not authenticated"})
 
                 # Browser pages redirect to login.
@@ -285,6 +285,37 @@ def me(request: Request):
         "role": request.session.get("role"),
         "is_active": request.session.get("is_active"),
     }
+
+
+@app.get("/api/reps")
+def api_reps(request: Request):
+    """
+    Return list of active users (reps) for dropdowns.
+    Auth required - middleware will return 401 if not authenticated.
+    """
+    u = request.session.get("username")
+    if not u:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    
+    db = SessionLocal()
+    try:
+        # Get all active users, ordered by ID
+        users = db.query(User).filter(User.is_active == True).order_by(User.id.asc()).all()
+        
+        # Return minimal rep data needed for dropdown
+        reps = []
+        for user in users:
+            reps.append({
+                "id": user.id,
+                "rep_code": user.rep_code or "",
+                "rep_name": user.rep_name or "",
+                "username": user.username or "",
+                "role": user.role or "user",
+            })
+        
+        return reps
+    finally:
+        db.close()
 
 
 @app.get("/trello/card-url/{card_id}")
@@ -3299,4 +3330,4 @@ def web_order_print(request: Request, order_id: int):
 
 @app.get("/health")
 def health():
-    return {"status": "BYP Ops backend online"}
+    return {"status": "BYP Ops backend online"}

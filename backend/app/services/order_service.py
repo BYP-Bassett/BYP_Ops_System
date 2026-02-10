@@ -29,9 +29,9 @@ def get_order_by_id(db: Session, order_id: int):
 
 
 def create_order(db: Session, data):
-    # If Radio/Video → generate SP (ART does NOT use SP numbers)
+    # If Radio/Video/Other → generate SP (ART does NOT use SP numbers)
     sp_record = None
-    if data.asset_type in ["radio", "video"]:
+    if data.asset_type in ["radio", "video", "other"]:
         sp_record = generate_next_sp(db, data.asset_type)
 
     new_order = Order(
@@ -167,7 +167,7 @@ def finalize_order(
     """
     Finalize an order.
 
-    Radio/Video target behavior:
+    Radio/Video/Other target behavior:
       - If Trello linkage missing, create Trello card in rep's board "To Do" list.
       - Card title = full Artist field.
       - Create checklist named exactly SP# and populate items derived from notes.
@@ -178,7 +178,7 @@ def finalize_order(
       - Create checklist named MMDDYY-R# and populate items derived from notes.
       - Store Trello IDs on the order, then finalize.
 
-    Non radio/video/art: requires linkage to already exist.
+    Non radio/video/art/other: requires linkage to already exist.
     """
     card_id = (trello_card_id or "").strip() or (getattr(order, "trello_card_id", None) or "").strip()
     checklist_id = (trello_checklist_id or "").strip() or (getattr(order, "trello_checklist_id", None) or "").strip()
@@ -192,10 +192,10 @@ def finalize_order(
         card_id = ""
         checklist_id = ""
 
-    if asset in ("radio", "video"):
+    if asset in ("radio", "video", "other"):
 
         # Auto-assign SP if missing (defensive; also handled on asset_type flip).
-        # Without this, Art->Radio/Video flips can fail at finalize time.
+        # Without this, Art->Radio/Video/Other flips can fail at finalize time.
         if getattr(order, "sp_id", None) is None:
             sp_rec = generate_next_sp(db, asset)
             order.sp_id = sp_rec.id
@@ -234,7 +234,7 @@ def finalize_order(
 
         # IMPORTANT: if we're finalizing a draft that already has a Trello checklist linked
         # (common after Override Edit), we must rebuild the checklist so Trello matches the
-        # updated notes. For radio/video, checklist name must be the SP#.
+        # updated notes. For radio/video/other, checklist name must be the SP#.
         if checklist_id:
             if not sp_number:
                 raise RuntimeError("Cannot rebuild Trello checklist: SP number missing for this order.")
@@ -295,7 +295,7 @@ def finalize_order(
     else:
         if not card_id or not checklist_id:
             raise RuntimeError(
-                "Finalize requires Trello linkage for this asset type (radio/video/art auto-create only)."
+                "Finalize requires Trello linkage for this asset type (radio/video/art/other auto-create only)."
             )
     order.status = "finalized"
     order.finalized_at = datetime.now().isoformat()
