@@ -857,26 +857,98 @@ if (els.clearBtn) els.clearBtn.addEventListener("click", () => clearFilters());
       }
       .byp-modal{
         width:min(720px, 100%); background:#fff; border:1px solid #ddd;
-        border-radius:14px; padding:14px;
+        border-radius:14px; padding:20px;
         font-family:system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+        max-height: 90vh; overflow-y: auto;
       }
-      .byp-modal h3{ margin:0 0 10px 0; font-size:16px; }
-      .byp-row{ display:grid; grid-template-columns: 160px 1fr; gap:10px; margin:8px 0; align-items:center; }
-      .byp-row label{ font-size:12px; color:#444; }
+      .byp-modal h3{ margin:0 0 16px 0; font-size:18px; }
+      .byp-row{ display:grid; grid-template-columns: 160px 1fr; gap:10px; margin:10px 0; align-items:center; }
+      .byp-row label{ font-size:13px; color:#444; font-weight: 500; }
       .byp-row input, .byp-row textarea, .byp-row select{
-        width:100%; padding:8px 10px; border:1px solid #ccc; border-radius:10px; font-size:14px;
+        width:100%; padding:10px 12px; border:1px solid #ccc; border-radius:10px; font-size:15px;
       }
       .byp-row textarea{ min-height:90px; resize:vertical; }
-      .byp-actions{ display:flex; gap:10px; justify-content:flex-end; margin-top:12px; flex-wrap:wrap; }
-      .byp-hint{ font-size:12px; color:#666; }
-      .byp-err{ color:#b00020; font-weight:700; white-space:pre-wrap; }
+      .byp-actions{ display:flex; gap:10px; justify-content:flex-end; margin-top:16px; flex-wrap:wrap; }
+      .byp-actions button{ padding:10px 20px; min-height:44px; font-size:15px; }
+      .byp-hint{ font-size:12px; color:#666; margin-top: 8px; }
+      .byp-err{ color:#b00020; font-weight:700; white-space:pre-wrap; margin-top: 8px; }
       .byp-suggest{ position:absolute; left:0; right:0; top:calc(100% + 2px);
         background:#fff; border:1px solid #ccc; border-radius:10px; box-shadow:0 8px 20px rgba(0,0,0,.12);
         max-height:220px; overflow:auto; z-index:10000; display:none; }
-      .byp-suggest-item{ padding:8px 10px; cursor:pointer; font-size:13px; }
+      .byp-suggest-item{ padding:10px 12px; cursor:pointer; font-size:14px; }
       .byp-suggest-item:hover{ background:#f3f3f3; }
       .byp-suggest-item.active{ background:#93c5fd; }
       .byp-suggest-muted{ color:#666; font-size:12px; }
+      
+      /* Checkbox group styling */
+      .byp-checkbox-group{ 
+        display: flex; 
+        gap: 16px; 
+        align-items: center; 
+        padding: 8px 0;
+        flex-wrap: wrap;
+      }
+      .byp-checkbox-label{ 
+        display: flex; 
+        align-items: center; 
+        gap: 6px; 
+        cursor: pointer;
+        white-space: nowrap;
+      }
+      .byp-checkbox-label input[type="checkbox"]{ 
+        width: 20px; 
+        height: 20px; 
+        cursor: pointer;
+        margin: 0;
+      }
+      .byp-checkbox-label span{ 
+        font-size: 14px; 
+        user-select: none;
+      }
+      
+      /* Mobile responsiveness */
+      @media (max-width: 768px) {
+        .byp-modal-overlay{ padding: 8px; }
+        .byp-modal{ 
+          width: 100%; 
+          padding: 16px; 
+          border-radius: 12px;
+          max-height: 95vh;
+        }
+        .byp-modal h3{ font-size: 16px; margin-bottom: 12px; }
+        .byp-row{ 
+          grid-template-columns: 1fr; 
+          gap: 6px; 
+          margin: 12px 0;
+        }
+        .byp-row label{ font-size: 12px; }
+        .byp-row input, .byp-row textarea, .byp-row select{
+          padding: 12px;
+          font-size: 16px; /* Prevents iOS zoom on focus */
+          min-height: 44px; /* Touch-friendly */
+        }
+        .byp-actions{ margin-top: 20px; }
+        .byp-actions button{ 
+          flex: 1;
+          min-width: 120px;
+          padding: 12px 16px;
+          font-size: 16px;
+        }
+        .byp-checkbox-group{ 
+          gap: 12px;
+          padding: 12px 0;
+        }
+        .byp-checkbox-label{ 
+          min-height: 44px; /* Touch-friendly */
+        }
+        .byp-checkbox-label input[type="checkbox"]{ 
+          width: 24px; 
+          height: 24px;
+        }
+        .byp-checkbox-label span{ 
+          font-size: 16px;
+        }
+      }
     `;
     document.head.appendChild(style);
   }
@@ -893,6 +965,10 @@ if (els.clearBtn) els.clearBtn.addEventListener("click", () => clearFilters());
 
     modal.innerHTML = `
       <h3>Create Order</h3>
+      
+      <!-- Honeypot fields to trick browser autocomplete -->
+      <input type="text" style="position:absolute;top:-9999px;left:-9999px" tabindex="-1" autocomplete="off" />
+      <input type="text" style="position:absolute;top:-9999px;left:-9999px" tabindex="-1" autocomplete="off" />
 
       <div class="byp-row">
         <label for="no_rep">Rep *</label>
@@ -910,12 +986,18 @@ if (els.clearBtn) els.clearBtn.addEventListener("click", () => clearFilters());
 
       <div class="byp-row">
         <label for="no_client_company">Company Name *</label>
-        <input id="no_client_company" type="text" placeholder="Company name" autocomplete="new-password" />
+        <div style="position:relative;">
+          <input id="no_client_company" type="text" placeholder="Company name" autocomplete="new-password" />
+          <div id="no_company_suggest" class="byp-suggest"></div>
+        </div>
       </div>
 
       <div class="byp-row">
         <label for="no_artist">Artist *</label>
-        <input id="no_artist" type="text" placeholder="Artist name" />
+        <div style="position:relative;">
+          <input id="no_artist" type="text" placeholder="Artist name" autocomplete="new-password" />
+          <div id="no_artist_suggest" class="byp-suggest"></div>
+        </div>
       </div>
 
       <div class="byp-row">
@@ -942,6 +1024,11 @@ if (els.clearBtn) els.clearBtn.addEventListener("click", () => clearFilters());
     const clientIdEl = $m("no_client_id");
     const clientSuggestBox = $m("no_client_suggest");
 
+    // Set random name attributes to completely prevent browser autocomplete
+    const rand = Math.random().toString(36).substring(7);
+    clientNameEl.setAttribute("name", "client_" + rand);
+    clientCompanyEl.setAttribute("name", "company_" + rand);
+
     // --- Client typeahead (New Order) ---
     let clientSuggestTimer = null;
     let clientSelectedCompany = null;
@@ -958,7 +1045,7 @@ if (els.clearBtn) els.clearBtn.addEventListener("click", () => clearFilters());
 
     async function fetchClientSuggest(q) {
       try {
-        const res = await fetch("/orders/clients/suggest?q=" + encodeURIComponent(q) + "&limit=10", { credentials: "same-origin" });
+        const res = await fetch("/orders/clients/suggest?q=" + encodeURIComponent(q) + "&limit=50", { credentials: "same-origin" });
         if (!res.ok) return [];
         const data = await res.json();
 
@@ -1145,7 +1232,222 @@ function onClientNameInput() {
       } catch (_) {}
     });
 
+    // --- Company autocomplete (New Order) ---
+    const companySuggestBox = $m("no_company_suggest");
+    let companySuggestTimer = null;
+    let companySuggestItems = [];
+    let companySuggestIndex = -1;
+
+    function hideCompanySuggest() {
+      if (!companySuggestBox) return;
+      companySuggestBox.style.display = "none";
+      companySuggestBox.innerHTML = "";
+      companySuggestItems = [];
+      companySuggestIndex = -1;
+    }
+
+    async function fetchCompanySuggest(q) {
+      try {
+        const res = await fetch("/orders/companies/suggest?q=" + encodeURIComponent(q) + "&limit=10", { credentials: "same-origin" });
+        if (!res.ok) return [];
+        const data = await res.json();
+        if (Array.isArray(data)) return data;
+        return [];
+      } catch (_) {
+        return [];
+      }
+    }
+
+    function setCompanySuggestActive(idx) {
+      if (!companySuggestBox) return;
+      const kids = Array.from(companySuggestBox.querySelectorAll(".byp-suggest-item"));
+      if (!kids.length) { companySuggestIndex = -1; return; }
+      let n = idx;
+      if (n < 0) n = 0;
+      if (n >= kids.length) n = kids.length - 1;
+
+      kids.forEach((el, i) => {
+        el.style.background = (i === n) ? "#93c5fd" : "transparent";
+        el.style.border = (i === n) ? "1px solid #1d4ed8" : "1px solid transparent";
+        el.style.borderRadius = "8px";
+        el.setAttribute("aria-selected", (i === n) ? "true" : "false");
+      });
+
+      companySuggestIndex = n;
+      try { kids[n].scrollIntoView({ block: "nearest" }); } catch (_) {}
+    }
+
+    function applyCompanySuggestItem(it) {
+      if (!it) return;
+      clientCompanyEl.value = String(it.company || "").trim();
+      hideCompanySuggest();
+    }
+
+    clientCompanyEl.addEventListener("input", () => {
+      const q = (clientCompanyEl.value || "").trim();
+      if (companySuggestTimer) clearTimeout(companySuggestTimer);
+      if (!q || q.length < 2) {
+        hideCompanySuggest();
+        return;
+      }
+      companySuggestTimer = setTimeout(async () => {
+        const results = await fetchCompanySuggest(q);
+        if (!results || results.length === 0) {
+          hideCompanySuggest();
+          return;
+        }
+        companySuggestItems = results;
+        companySuggestBox.innerHTML = "";
+        results.forEach((r, i) => {
+          const div = document.createElement("div");
+          div.className = "byp-suggest-item";
+          div.style.padding = "8px";
+          div.style.cursor = "pointer";
+          div.textContent = r.company || "";
+          div.addEventListener("click", () => applyCompanySuggestItem(r));
+          div.addEventListener("mouseenter", () => setCompanySuggestActive(i));
+          companySuggestBox.appendChild(div);
+        });
+        companySuggestBox.style.display = "block";
+        setCompanySuggestActive(0);
+      }, 300);
+    });
+
+    clientCompanyEl.addEventListener("keydown", (e) => {
+      if (companySuggestBox.style.display === "none") return;
+      const kids = Array.from(companySuggestBox.querySelectorAll(".byp-suggest-item"));
+      if (!kids.length) return;
+
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        setCompanySuggestActive(companySuggestIndex + 1);
+      } else if (e.key === "ArrowUp") {
+        e.preventDefault();
+        setCompanySuggestActive(companySuggestIndex - 1);
+      } else if (e.key === "Enter") {
+        e.preventDefault();
+        if (companySuggestIndex >= 0 && companySuggestIndex < companySuggestItems.length) {
+          applyCompanySuggestItem(companySuggestItems[companySuggestIndex]);
+        }
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        hideCompanySuggest();
+      }
+    });
+
+    clientCompanyEl.addEventListener("blur", () => {
+      setTimeout(() => hideCompanySuggest(), 200);
+    });
+
+    // --- Artist autocomplete (New Order) ---
     const artistEl = $m("no_artist");
+    const artistSuggestBox = $m("no_artist_suggest");
+    artistEl.setAttribute("name", "artist_" + rand);
+    let artistSuggestTimer = null;
+    let artistSuggestItems = [];
+    let artistSuggestIndex = -1;
+
+    function hideArtistSuggest() {
+      if (!artistSuggestBox) return;
+      artistSuggestBox.style.display = "none";
+      artistSuggestBox.innerHTML = "";
+      artistSuggestItems = [];
+      artistSuggestIndex = -1;
+    }
+
+    async function fetchArtistSuggest(q) {
+      try {
+        const res = await fetch("/orders/artists/suggest?q=" + encodeURIComponent(q) + "&limit=10", { credentials: "same-origin" });
+        if (!res.ok) return [];
+        const data = await res.json();
+        if (Array.isArray(data)) return data;
+        return [];
+      } catch (_) {
+        return [];
+      }
+    }
+
+    function setArtistSuggestActive(idx) {
+      if (!artistSuggestBox) return;
+      const kids = Array.from(artistSuggestBox.querySelectorAll(".byp-suggest-item"));
+      if (!kids.length) { artistSuggestIndex = -1; return; }
+      let n = idx;
+      if (n < 0) n = 0;
+      if (n >= kids.length) n = kids.length - 1;
+
+      kids.forEach((el, i) => {
+        el.style.background = (i === n) ? "#93c5fd" : "transparent";
+        el.style.border = (i === n) ? "1px solid #1d4ed8" : "1px solid transparent";
+        el.style.borderRadius = "8px";
+        el.setAttribute("aria-selected", (i === n) ? "true" : "false");
+      });
+
+      artistSuggestIndex = n;
+      try { kids[n].scrollIntoView({ block: "nearest" }); } catch (_) {}
+    }
+
+    function applyArtistSuggestItem(it) {
+      if (!it) return;
+      artistEl.value = String(it.artist || "").trim();
+      hideArtistSuggest();
+    }
+
+    artistEl.addEventListener("input", () => {
+      const q = (artistEl.value || "").trim();
+      if (artistSuggestTimer) clearTimeout(artistSuggestTimer);
+      if (!q || q.length < 2) {
+        hideArtistSuggest();
+        return;
+      }
+      artistSuggestTimer = setTimeout(async () => {
+        const results = await fetchArtistSuggest(q);
+        if (!results || results.length === 0) {
+          hideArtistSuggest();
+          return;
+        }
+        artistSuggestItems = results;
+        artistSuggestBox.innerHTML = "";
+        results.forEach((r, i) => {
+          const div = document.createElement("div");
+          div.className = "byp-suggest-item";
+          div.style.padding = "8px";
+          div.style.cursor = "pointer";
+          div.textContent = r.artist || "";
+          div.addEventListener("click", () => applyArtistSuggestItem(r));
+          div.addEventListener("mouseenter", () => setArtistSuggestActive(i));
+          artistSuggestBox.appendChild(div);
+        });
+        artistSuggestBox.style.display = "block";
+        setArtistSuggestActive(0);
+      }, 300);
+    });
+
+    artistEl.addEventListener("keydown", (e) => {
+      if (artistSuggestBox.style.display === "none") return;
+      const kids = Array.from(artistSuggestBox.querySelectorAll(".byp-suggest-item"));
+      if (!kids.length) return;
+
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        setArtistSuggestActive(artistSuggestIndex + 1);
+      } else if (e.key === "ArrowUp") {
+        e.preventDefault();
+        setArtistSuggestActive(artistSuggestIndex - 1);
+      } else if (e.key === "Enter") {
+        e.preventDefault();
+        if (artistSuggestIndex >= 0 && artistSuggestIndex < artistSuggestItems.length) {
+          applyArtistSuggestItem(artistSuggestItems[artistSuggestIndex]);
+        }
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        hideArtistSuggest();
+      }
+    });
+
+    artistEl.addEventListener("blur", () => {
+      setTimeout(() => hideArtistSuggest(), 200);
+    });
+
     const assetEl = $m("no_asset");
     const errEl = $m("no_err");
     const cancelBtn = $m("no_cancel");
@@ -1154,6 +1456,22 @@ function onClientNameInput() {
     // Populate dropdowns (Rep + Asset) from known lists / existing filter controls
     await populateRepSelect(repEl);
     populateAssetSelect(assetEl);
+
+    // Disable browser autocomplete completely using readonly trick
+    clientNameEl.setAttribute("readonly", "readonly");
+    clientCompanyEl.setAttribute("readonly", "readonly");
+    artistEl.setAttribute("readonly", "readonly");
+    
+    // Remove readonly on focus so user can type
+    clientNameEl.addEventListener("focus", function() {
+      this.removeAttribute("readonly");
+    }, { once: true });
+    clientCompanyEl.addEventListener("focus", function() {
+      this.removeAttribute("readonly");
+    }, { once: true });
+    artistEl.addEventListener("focus", function() {
+      this.removeAttribute("readonly");
+    }, { once: true });
 
     // Default focus
     setTimeout(() => { try { clientNameEl.focus(); } catch (_) {} }, 0);
@@ -1301,6 +1619,10 @@ createBtn.addEventListener("click", create);
 
     modal.innerHTML = `
       <h3>Create Tour</h3>
+      
+      <!-- Honeypot fields to trick browser autocomplete -->
+      <input type="text" style="position:absolute;top:-9999px;left:-9999px" tabindex="-1" autocomplete="off" />
+      <input type="text" style="position:absolute;top:-9999px;left:-9999px" tabindex="-1" autocomplete="off" />
 
       <div class="byp-row">
         <label for="nt_rep">Rep *</label>
@@ -1327,27 +1649,27 @@ createBtn.addEventListener("click", create);
       <div class="byp-row">
         <label for="nt_artist">Artist *</label>
         <div style="position:relative;">
-          <input id="nt_artist" type="text" placeholder="Artist name" />
+          <input id="nt_artist" type="text" placeholder="Artist name" autocomplete="new-password" />
           <div id="nt_artist_suggest" class="byp-suggest"></div>
         </div>
       </div>
 
       <div class="byp-row">
         <label>Asset Types * (select at least one)</label>
-        <div style="display: flex; gap: 16px; align-items: center; padding: 8px 0;">
-          <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
+        <div class="byp-checkbox-group">
+          <label class="byp-checkbox-label">
             <input type="checkbox" id="nt_asset_art" value="art" />
             <span>Art</span>
           </label>
-          <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
+          <label class="byp-checkbox-label">
             <input type="checkbox" id="nt_asset_radio" value="radio" />
             <span>Radio</span>
           </label>
-          <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
+          <label class="byp-checkbox-label">
             <input type="checkbox" id="nt_asset_video" value="video" />
             <span>Video</span>
           </label>
-          <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
+          <label class="byp-checkbox-label">
             <input type="checkbox" id="nt_asset_other" value="other" />
             <span>Other</span>
           </label>
@@ -1375,6 +1697,13 @@ createBtn.addEventListener("click", create);
     const companySuggestBox = $m("nt_company_suggest");
     const artistEl = $m("nt_artist");
     const artistSuggestBox = $m("nt_artist_suggest");
+    
+    // Set random name attributes to completely prevent browser autocomplete
+    const rand = Math.random().toString(36).substring(7);
+    clientNameEl.setAttribute("name", "tclient_" + rand);
+    clientCompanyEl.setAttribute("name", "tcompany_" + rand);
+    artistEl.setAttribute("name", "tartist_" + rand);
+    
     const assetArtEl = $m("nt_asset_art");
     const assetRadioEl = $m("nt_asset_radio");
     const assetVideoEl = $m("nt_asset_video");
@@ -1497,27 +1826,6 @@ createBtn.addEventListener("click", create);
       setTimeout(() => hideClientSuggest(), 200);
     });
 
-    // Double-click to show all clients
-    clientNameEl.addEventListener("dblclick", async () => {
-      const results = await fetchClientSuggest("a"); // fetch with common letter to get many results
-      if (!results || results.length === 0) return;
-      clientSuggestItems = results;
-      clientSuggestBox.innerHTML = "";
-      results.forEach((r, i) => {
-        const div = document.createElement("div");
-        div.className = "byp-suggest-item";
-        div.style.padding = "8px";
-        div.style.cursor = "pointer";
-        div.textContent = (r.client_name || r.name || "") + (r.company_name || r.company ? " — " + (r.company_name || r.company) : "");
-        div.addEventListener("click", () => applyClientSuggestItem(r));
-        div.addEventListener("mouseenter", () => setClientSuggestActive(i));
-        clientSuggestBox.appendChild(div);
-      });
-      clientSuggestBox.style.display = "block";
-      setClientSuggestActive(0);
-      clientNameEl.select(); // Select the text for easy replacement
-    });
-
     // --- Company autocomplete (from existing orders) ---
     let companySuggestTimer = null;
     let companySuggestItems = [];
@@ -1622,27 +1930,6 @@ createBtn.addEventListener("click", create);
 
     clientCompanyEl.addEventListener("blur", () => {
       setTimeout(() => hideCompanySuggest(), 200);
-    });
-
-    // Double-click to show all companies
-    clientCompanyEl.addEventListener("dblclick", async () => {
-      const results = await fetchCompanySuggest("a"); // fetch with common letter
-      if (!results || results.length === 0) return;
-      companySuggestItems = results;
-      companySuggestBox.innerHTML = "";
-      results.forEach((r, i) => {
-        const div = document.createElement("div");
-        div.className = "byp-suggest-item";
-        div.style.padding = "8px";
-        div.style.cursor = "pointer";
-        div.textContent = r.company || "";
-        div.addEventListener("click", () => applyCompanySuggestItem(r));
-        div.addEventListener("mouseenter", () => setCompanySuggestActive(i));
-        companySuggestBox.appendChild(div);
-      });
-      companySuggestBox.style.display = "block";
-      setCompanySuggestActive(0);
-      clientCompanyEl.select();
     });
 
     // --- Artist autocomplete (from existing orders) ---
@@ -1751,26 +2038,21 @@ createBtn.addEventListener("click", create);
       setTimeout(() => hideArtistSuggest(), 200);
     });
 
-    // Double-click to show all artists
-    artistEl.addEventListener("dblclick", async () => {
-      const results = await fetchArtistSuggest("a"); // fetch with common letter
-      if (!results || results.length === 0) return;
-      artistSuggestItems = results;
-      artistSuggestBox.innerHTML = "";
-      results.forEach((r, i) => {
-        const div = document.createElement("div");
-        div.className = "byp-suggest-item";
-        div.style.padding = "8px";
-        div.style.cursor = "pointer";
-        div.textContent = r.artist || "";
-        div.addEventListener("click", () => applyArtistSuggestItem(r));
-        div.addEventListener("mouseenter", () => setArtistSuggestActive(i));
-        artistSuggestBox.appendChild(div);
-      });
-      artistSuggestBox.style.display = "block";
-      setArtistSuggestActive(0);
-      artistEl.select();
-    });
+    // Disable browser autocomplete completely using readonly trick
+    clientNameEl.setAttribute("readonly", "readonly");
+    clientCompanyEl.setAttribute("readonly", "readonly");
+    artistEl.setAttribute("readonly", "readonly");
+    
+    // Remove readonly on focus so user can type
+    clientNameEl.addEventListener("focus", function() {
+      this.removeAttribute("readonly");
+    }, { once: true });
+    clientCompanyEl.addEventListener("focus", function() {
+      this.removeAttribute("readonly");
+    }, { once: true });
+    artistEl.addEventListener("focus", function() {
+      this.removeAttribute("readonly");
+    }, { once: true });
 
     // Default focus
     setTimeout(() => { try { clientNameEl.focus(); } catch (_) {} }, 0);
