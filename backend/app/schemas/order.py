@@ -13,6 +13,7 @@ class OrderCreate(BaseModel):
     artist: str
     asset_type: str
     notes: Optional[str] = None
+    voice_talent: Optional[str] = None
 
     rep_name: Optional[str] = "SB - Steve Bassett"
 
@@ -58,6 +59,7 @@ class OrderUpdate(BaseModel):
     artist: Optional[str] = None
     asset_type: Optional[str] = None
     notes: Optional[str] = None
+    voice_talent: Optional[str] = None
 
     rep_name: Optional[str] = None
 
@@ -132,6 +134,7 @@ class OrderResponse(BaseModel):
     artist: str
     asset_type: str
     notes: Optional[str] = None
+    voice_talent: Optional[str] = None
 
     rep_name: str
 

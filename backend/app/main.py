@@ -83,6 +83,7 @@ except Exception:  # pragma: no cover
     sql_text = None
 
 from app.routes.orders import router as orders_router
+from app.routes.voice_talents import router as voice_talents_router
 
 # DB / models (for auth)
 from app.database.engine import SessionLocal
@@ -576,6 +577,7 @@ def admin_users_page(request: Request, msg: str | None = None, err: str | None =
   <div class="bar">
     <a class="btnlink" href="/">← Back to Search</a>
     <a class="btnlink" href="/admin/users">Users</a>
+    <a class="btnlink" href="/admin/voice-talents">Voice Talents</a>
     <a class="btnlink" href="/admin/deleted-orders">Deleted Orders</a>
     <button class="btnlink" type="button" onclick="location.href='/admin/clients'">Clients/Company</button>
 
@@ -798,6 +800,282 @@ def admin_users_set_password(request: Request, user_id: int, password: str = For
 
 
 
+
+# ---- Voice Talents Admin Page ----
+@app.get("/admin/voice-talents", include_in_schema=False)
+def admin_voice_talents_page(request: Request, msg: str | None = None, err: str | None = None):
+    gate = _require_admin_or_redirect(request)
+    if gate is not None:
+        return gate
+
+    db = SessionLocal()
+    try:
+        from app.models.voice_talent import VoiceTalent
+        voices = db.query(VoiceTalent).order_by(VoiceTalent.sort_order.asc()).all()
+    finally:
+        db.close()
+
+    # Group by section
+    in_house = []
+    outside = []
+    for v in voices:
+        if getattr(v, "is_label", False):
+            continue  # Skip section labels
+        section = getattr(v, "section", "")
+        name = _html_escape(str(getattr(v, "name", "")))
+        vid = getattr(v, "id", 0)
+        
+        row_html = f"""
+        <tr>
+          <td>{name}</td>
+          <td style="white-space:nowrap;">
+            <form method="post" action="/admin/voice-talents/{vid}/delete" style="display:inline; margin:0;">
+              <button type="submit" onclick="return confirm('Delete {name}?')">Delete</button>
+            </form>
+          </td>
+        </tr>
+        """
+        
+        if section == "IN_HOUSE":
+            in_house.append(row_html)
+        else:
+            outside.append(row_html)
+
+    msg_txt = _html_escape((msg or "").strip())
+    err_txt = _html_escape((err or "").strip())
+
+    html = f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>BYP Ops — Voice Talents</title>
+  <style>
+    body {{ font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 16px; max-width: 1200px; }}
+    h1 {{ margin: 0 0 10px 0; font-size: 22px; }}
+    h2 {{ margin: 0 0 10px 0; font-size: 16px; }}
+    .bar {{ display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin: 10px 0 14px 0; }}
+    a {{ color: inherit; }}
+    button {{ padding: 8px 12px; border: 1px solid #888; border-radius: 10px; background: #f4f4f4; cursor: pointer; }}
+    button:active {{ transform: translateY(1px); }}
+    .btnlink {{ padding: 8px 12px; border: 1px solid #888; border-radius: 10px; background: #f4f4f4; cursor: pointer; text-decoration: none; display: inline-block; }}
+    .btnlink:active {{ transform: translateY(1px); }}
+    .card {{ border: 1px solid #ddd; border-radius: 12px; padding: 12px; background: #fff; margin-bottom: 12px; }}
+    .muted {{ color: #666; font-size: 13px; }}
+    .ok {{ color: #0a7b27; font-weight: 700; white-space: pre-wrap; }}
+    .err {{ color: #b00020; font-weight: 700; white-space: pre-wrap; }}
+    table {{ width: 100%; border-collapse: collapse; }}
+    th, td {{ padding: 8px; border-bottom: 1px solid #eee; text-align: left; vertical-align: top; font-size: 14px; }}
+    th {{ font-size: 12px; color: #444; user-select: none; }}
+    input {{ font-size: 14px; }}
+    .grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }}
+    @media (max-width: 900px) {{ .grid {{ grid-template-columns: 1fr; }} }}
+  </style>
+</head>
+<body>
+  <h1>Admin — Voice Talents</h1>
+
+  <div class="bar">
+    <a class="btnlink" href="/">← Back to Search</a>
+    <a class="btnlink" href="/admin/users">Users</a>
+    <a class="btnlink" href="/admin/voice-talents">Voice Talents</a>
+    <a class="btnlink" href="/admin/deleted-orders">Deleted Orders</a>
+    <button class="btnlink" type="button" onclick="location.href='/admin/clients'">Clients/Company</button>
+
+    <form method="post" action="/logout" style="margin:0;">
+      <button type="submit">Logout</button>
+    </form>
+    <span class="muted">Logged in as: <b>{_html_escape(str(request.session.get("username") or ""))}</b></span>
+  </div>
+
+  <div class="ok">{msg_txt}</div>
+  <div class="err">{err_txt}</div>
+
+  <div class="card">
+    <h2>Add Voice Talent</h2>
+    <form method="post" action="/admin/voice-talents/add" style="display:flex; gap:10px; flex-wrap:wrap; align-items:flex-end;">
+      <div>
+        <div class="muted">Name *</div>
+        <input name="name" placeholder="Voice talent name" required style="padding:8px 10px; border:1px solid #ccc; border-radius:10px; width:220px;" />
+      </div>
+      <div>
+        <div class="muted">Section *</div>
+        <select name="section" style="padding:8px 10px; border:1px solid #ccc; border-radius:10px; width:140px;">
+          <option value="IN_HOUSE">In House</option>
+          <option value="OUTSIDE" selected>Outside</option>
+        </select>
+      </div>
+      <button type="submit">Add</button>
+    </form>
+    <div class="muted" style="margin-top:10px;">
+      New voices are automatically inserted alphabetically within their section.
+    </div>
+  </div>
+
+  <div class="grid">
+    <div class="card">
+      <h2>In House ({len(in_house)})</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Name</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          {''.join(in_house) if in_house else '<tr><td colspan="2" class="muted">No in-house voices</td></tr>'}
+        </tbody>
+      </table>
+    </div>
+
+    <div class="card">
+      <h2>Outside ({len(outside)})</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Name</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          {''.join(outside) if outside else '<tr><td colspan="2" class="muted">No outside voices</td></tr>'}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</body>
+</html>
+"""
+    return HTMLResponse(content=html)
+
+
+@app.post("/admin/voice-talents/add", include_in_schema=False)
+def admin_voice_talents_add(
+    request: Request,
+    name: str = Form(...),
+    section: str = Form("OUTSIDE"),
+):
+    gate = _require_admin_or_redirect(request)
+    if gate is not None:
+        return gate
+
+    name = (name or "").strip()
+    if not name:
+        return RedirectResponse(url="/admin/voice-talents?err=Name+required", status_code=303)
+
+    section = (section or "OUTSIDE").strip().upper()
+    if section not in ("IN_HOUSE", "OUTSIDE"):
+        section = "OUTSIDE"
+
+    # Get username for created_by
+    username = _username_from_session(request)
+
+    db = SessionLocal()
+    try:
+        from app.models.voice_talent import VoiceTalent
+        from app.models.users import User
+        
+        # Get user_id from username
+        user = db.query(User).filter(User.username == username).first()
+        user_id = user.id if user else None
+
+        # Check if name already exists in this section
+        existing = db.query(VoiceTalent).filter(
+            VoiceTalent.name == name,
+            VoiceTalent.section == section,
+            VoiceTalent.is_label == False
+        ).first()
+        
+        if existing:
+            return RedirectResponse(url=f"/admin/voice-talents?err={name}+already+exists+in+{section}", status_code=303)
+
+        # Find alphabetical insertion point
+        voices_in_section = db.query(VoiceTalent).filter(
+            VoiceTalent.section == section,
+            VoiceTalent.is_label == False
+        ).order_by(VoiceTalent.sort_order.asc()).all()
+
+        # Find where to insert alphabetically
+        insert_index = 0
+        for i, v in enumerate(voices_in_section):
+            if name.lower() < v.name.lower():
+                insert_index = i
+                break
+            insert_index = i + 1
+
+        # Calculate sort_order (insert at correct position)
+        if not voices_in_section:
+            # First voice in section - put it after the label
+            label = db.query(VoiceTalent).filter(
+                VoiceTalent.section == section,
+                VoiceTalent.is_label == True
+            ).first()
+            sort_order = label.sort_order + 1 if label else 100
+        elif insert_index == 0:
+            # Insert at beginning
+            sort_order = voices_in_section[0].sort_order - 1
+        elif insert_index >= len(voices_in_section):
+            # Insert at end
+            sort_order = voices_in_section[-1].sort_order + 1
+        else:
+            # Insert between two voices
+            before = voices_in_section[insert_index - 1].sort_order
+            after = voices_in_section[insert_index].sort_order
+            sort_order = (before + after) / 2
+
+        # Create new voice
+        new_voice = VoiceTalent(
+            name=name,
+            is_label=False,
+            section=section,
+            sort_order=sort_order,
+            created_by_user_id=user_id
+        )
+        db.add(new_voice)
+        db.commit()
+
+        return RedirectResponse(url=f"/admin/voice-talents?msg=Added+{name}", status_code=303)
+    except Exception as e:
+        db.rollback()
+        return RedirectResponse(url=f"/admin/voice-talents?err={str(e)}", status_code=303)
+    finally:
+        db.close()
+
+
+@app.post("/admin/voice-talents/{voice_id}/delete", include_in_schema=False)
+def admin_voice_talents_delete(request: Request, voice_id: int):
+    gate = _require_admin_or_redirect(request)
+    if gate is not None:
+        return gate
+
+    db = SessionLocal()
+    try:
+        from app.models.voice_talent import VoiceTalent
+        from app.models.orders import Order
+        
+        voice = db.query(VoiceTalent).filter(VoiceTalent.id == voice_id).first()
+        if not voice:
+            return RedirectResponse(url="/admin/voice-talents?err=Voice+not+found", status_code=303)
+
+        voice_name = voice.name
+
+        # Clear this voice from any orders
+        orders_with_voice = db.query(Order).filter(Order.voice_talent == voice_name).all()
+        for order in orders_with_voice:
+            order.voice_talent = None
+
+        # Delete the voice
+        db.delete(voice)
+        db.commit()
+
+        return RedirectResponse(url=f"/admin/voice-talents?msg=Deleted+{voice_name}", status_code=303)
+    except Exception as e:
+        db.rollback()
+        return RedirectResponse(url=f"/admin/voice-talents?err={str(e)}", status_code=303)
+    finally:
+        db.close()
+
+
 # ---- Clients / Company List (web) ----
 # NOTE: Despite the "/admin/*" URL, this page is intentionally available to ANY logged-in user.
 # Goal: stable client/company editing + active/inactive toggle. No delete UI.
@@ -978,6 +1256,7 @@ def clients_page(request: Request, msg: str | None = None, err: str | None = Non
   <div class="topbar">
     <a class="btnlink" href="/">← Back to Search</a>
     <a class="btnlink" href="/admin/users">Users</a>
+    <a class="btnlink" href="/admin/voice-talents">Voice Talents</a>
     <a class="btnlink" href="/admin/deleted-orders">Deleted Orders</a>
     <button class="btnlink" type="button" onclick="location.href='/admin/clients'">Clients/Company</button>
     <span class="muted">Signed in as <b>__USERNAME__</b></span>
@@ -1546,6 +1825,7 @@ def admin_deleted_orders_page(request: Request, msg: str | None = None, err: str
   <div class=\"bar\">
     <a class=\"btnlink\" href=\"/\">← Back to Search</a>
     <a class=\"btnlink\" href=\"/admin/users\">Users</a>
+    <a class=\"btnlink\" href=\"/admin/voice-talents\">Voice Talents</a>
     <a class=\"btnlink\" href=\"/admin/deleted-orders\">Deleted Orders</a>
     <a class=\"btnlink\" href=\"/admin/clients\">Clients/Company</a>
     <form method=\"post\" action=\"/logout\" style=\"margin:0;\">
@@ -1627,6 +1907,7 @@ def admin_deleted_orders_restore(request: Request, order_id: int):
 
 # API routes
 app.include_router(orders_router)
+app.include_router(voice_talents_router)
 
 # --- Web UI (vanilla HTML/JS served by FastAPI) ---
 APP_DIR = Path(__file__).resolve().parent
@@ -3330,4 +3611,4 @@ def web_order_print(request: Request, order_id: int):
 
 @app.get("/health")
 def health():
-    return {"status": "BYP Ops backend online"}
+    return {"status": "BYP Ops backend online"}

@@ -1,6 +1,10 @@
 (() => {
   const API_URL = "/orders/search2";
 
+  // ===== VOICE TALENTS CACHE =====
+  let voiceTalentsCache = [];
+  let voiceTalentsLoaded = false;
+
 
 
 // ----- UI: Move Admin button/link to the far right on the main Search toolbar.
@@ -31,7 +35,6 @@ function reorderSearchToolbarButtons(){
 
     const btnNewOrder = document.getElementById("newOrderBtn") || document.getElementById("btnNewOrder") || findByText("New order");
     const btnNewTour  = document.getElementById("newTourBtn")  || document.getElementById("btnNewTour")  || findByText("New tour");
-    const btnClients  = document.getElementById("clientsBtn") || document.getElementById("btnClients")  || findByText("Clients");
 
     // Admin + Logout often live in the same toolbar row; be flexible
     let btnAdmin  = document.getElementById("btnAdminUsers") || document.getElementById("btnAdmin") || findByText("Admin users") || findByText("Admin");
@@ -40,7 +43,7 @@ function reorderSearchToolbarButtons(){
     // CRITICAL: Logout button is inside a <form> - we must move the form, not the button
     let logoutForm = btnLogout ? btnLogout.closest("form") : null;
 
-    const first = btnMyDrafts || btnAll || btnSearch || btnClear || btnNewOrder || btnClients || btnAdmin || btnLogout;
+    const first = btnMyDrafts || btnAll || btnSearch || btnClear || btnNewOrder || btnAdmin || btnLogout;
     if (!first) return;
 
     // Find a sane toolbar host
@@ -89,10 +92,9 @@ function reorderSearchToolbarButtons(){
     move(btnSearch, left);
     move(btnClear, left);
 
-    // MIDDLE: New order, New Tour, Clients
+    // MIDDLE: New order, New Tour
     move(btnNewOrder, mid);
     move(btnNewTour, mid);
-    move(btnClients, mid);
 
     // RIGHT: Admin (rename to Admin), Logout
     if (btnAdmin) {
@@ -130,57 +132,6 @@ function reorderSearchToolbarButtons(){
     // ignore
   }
 }
-
-// ----- UI: Ensure a real Clients button exists on the Search page (not a naked link).
-function ensureClientsButton() {
-  try {
-    const norm = (s) => (s || "").trim().toLowerCase();
-
-    // If we already have a clients button, just wire it.
-    let clientsBtn = document.getElementById("clientsBtn");
-
-    // Some older HTML used a plain link. If present, reuse it.
-    if (!clientsBtn) {
-      const links = document.querySelectorAll('a[href="/admin/clients"], a[href="/admin/clients/"], a[href*="/admin/clients"]');
-      if (links && links.length) {
-        // Turn the first matching link into a button-like control by keeping the node and adding id.
-        clientsBtn = links[0];
-        try { clientsBtn.id = "clientsBtn"; } catch (_) {}
-      }
-    }
-
-    // If still missing, create it (for ALL logged-in users).
-    if (!clientsBtn) {
-      const group = document.getElementById("searchToolbarLeftGroup");
-      // Use an existing toolbar button as styling reference if possible.
-      const sampleBtn =
-        document.getElementById("myDraftsBtn") ||
-        document.getElementById("allBtn") ||
-        document.getElementById("searchBtn") ||
-        document.getElementById("clearBtn") ||
-        document.getElementById("newOrderBtn");
-
-      clientsBtn = document.createElement("button");
-      clientsBtn.type = "button";
-      clientsBtn.id = "clientsBtn";
-      clientsBtn.textContent = "Clients";
-      if (sampleBtn && sampleBtn.className) clientsBtn.className = sampleBtn.className;
-
-      // Put it near the other toolbar buttons if we can.
-      if (group) group.appendChild(clientsBtn);
-      else if (sampleBtn && sampleBtn.parentElement) sampleBtn.parentElement.appendChild(clientsBtn);
-      else document.body.appendChild(clientsBtn); // last resort
-    }
-
-    // Wire it
-    clientsBtn.addEventListener("click", () => {
-      try { window.location.href = "/admin/clients"; } catch (_) {}
-    });
-  } catch (_) {}
-}
-
-try { ensureClientsButton(); } catch (_) {}
-try { document.addEventListener('DOMContentLoaded', ensureClientsButton); } catch (_) {}
 
 // ----- UI: Ensure a "New Tour" button exists on the Search page.
 function ensureNewTourButton() {
@@ -230,6 +181,89 @@ try { document.addEventListener('DOMContentLoaded', ensureNewTourButton); } catc
 
 try { reorderSearchToolbarButtons(); } catch (_) {}
 try { document.addEventListener('DOMContentLoaded', reorderSearchToolbarButtons); } catch (_) {}
+
+
+  // ===== VOICE TALENTS: Load and populate dropdowns =====
+  async function loadVoiceTalents() {
+    if (voiceTalentsLoaded) return voiceTalentsCache;
+    
+    try {
+      const res = await fetch('/api/voice-talents', { 
+        method: 'GET',
+        credentials: 'same-origin' 
+      });
+      
+      if (!res.ok) {
+        console.warn('Failed to load voice talents:', res.status);
+        return [];
+      }
+      
+      const data = await res.json();
+      voiceTalentsCache = Array.isArray(data) ? data : [];
+      voiceTalentsLoaded = true;
+      return voiceTalentsCache;
+    } catch (err) {
+      console.error('Error loading voice talents:', err);
+      return [];
+    }
+  }
+
+  function populateVoiceTalentDropdown(selectElement) {
+    if (!selectElement) return;
+    
+    // Clear and add default option
+    selectElement.innerHTML = '<option value="">-- Select Voice Talent (Optional) --</option>';
+    
+    if (!voiceTalentsCache || voiceTalentsCache.length === 0) return;
+    
+    // Group by section
+    const inHouse = voiceTalentsCache.filter(v => v.section === 'IN_HOUSE');
+    const outside = voiceTalentsCache.filter(v => v.section === 'OUTSIDE');
+    
+    // Add IN_HOUSE group
+    if (inHouse.length > 0) {
+      const inHouseGroup = document.createElement('optgroup');
+      inHouseGroup.label = 'In House';
+      inHouse.forEach(voice => {
+        const option = document.createElement('option');
+        option.value = voice.name;
+        option.textContent = voice.name;
+        inHouseGroup.appendChild(option);
+      });
+      selectElement.appendChild(inHouseGroup);
+    }
+    
+    // Add OUTSIDE group
+    if (outside.length > 0) {
+      const outsideGroup = document.createElement('optgroup');
+      outsideGroup.label = 'Outside';
+      outside.forEach(voice => {
+        const option = document.createElement('option');
+        option.value = voice.name;
+        option.textContent = voice.name;
+        outsideGroup.appendChild(option);
+      });
+      selectElement.appendChild(outsideGroup);
+    }
+  }
+
+  function injectVoiceIntoNotes(voiceName, notesTextarea) {
+    if (!voiceName || !notesTextarea) return;
+    
+    const currentNotes = (notesTextarea.value || '').trim();
+    const voiceTag = `**Voice**\n${voiceName}\n\n`;
+    
+    // Check if notes already start with **Voice** tag
+    const voiceTagRegex = /^\*\*Voice\*\*\n.*?\n\n/s;
+    
+    if (voiceTagRegex.test(currentNotes)) {
+      // Replace existing voice tag
+      notesTextarea.value = currentNotes.replace(voiceTagRegex, voiceTag);
+    } else {
+      // Prepend voice tag
+      notesTextarea.value = voiceTag + currentNotes;
+    }
+  }
 
 
   // ----- Clients: best-effort create so new names appear in suggest (fast v1)
@@ -1005,6 +1039,16 @@ if (els.clearBtn) els.clearBtn.addEventListener("click", () => clearFilters());
         <select id="no_asset"></select>
       </div>
 
+      <div class="byp-row" id="no_voice_row" style="display:none;">
+        <label for="no_voice">Voice Talent</label>
+        <select id="no_voice"></select>
+      </div>
+
+      <div class="byp-row" id="no_notes_row" style="display:none;">
+        <label for="no_notes">Notes</label>
+        <textarea id="no_notes" rows="3" placeholder="Optional notes..."></textarea>
+      </div>
+
       <div class="byp-hint">* required</div>
       <div id="no_err" class="byp-err"></div>
       <div class="byp-actions">
@@ -1449,6 +1493,10 @@ function onClientNameInput() {
     });
 
     const assetEl = $m("no_asset");
+    const voiceEl = $m("no_voice");
+    const voiceRowEl = $m("no_voice_row");
+    const notesEl = $m("no_notes");
+    const notesRowEl = $m("no_notes_row");
     const errEl = $m("no_err");
     const cancelBtn = $m("no_cancel");
     const createBtn = $m("no_create");
@@ -1456,6 +1504,30 @@ function onClientNameInput() {
     // Populate dropdowns (Rep + Asset) from known lists / existing filter controls
     await populateRepSelect(repEl);
     populateAssetSelect(assetEl);
+    
+    // Load voice talents and populate dropdown
+    await loadVoiceTalents();
+    populateVoiceTalentDropdown(voiceEl);
+
+    // Show/hide voice talent dropdown based on asset type
+    function toggleVoiceDropdown() {
+      const asset = String(assetEl.value || '').trim().toLowerCase();
+      const showVoice = (asset === 'radio' || asset === 'video' || asset === 'other');
+      
+      if (voiceRowEl) voiceRowEl.style.display = showVoice ? 'flex' : 'none';
+      if (notesRowEl) notesRowEl.style.display = showVoice ? 'flex' : 'none';
+      
+      // Reset voice selection if hidden
+      if (!showVoice && voiceEl) voiceEl.value = '';
+    }
+    
+    // Wire up asset change handler
+    assetEl.addEventListener('change', toggleVoiceDropdown);
+    
+    // Initial toggle
+    toggleVoiceDropdown();
+    
+    // Voice dropdown does nothing special - backend will handle notes generation
 
     // Disable browser autocomplete completely using readonly trick
     clientNameEl.setAttribute("readonly", "readonly");
@@ -1532,6 +1604,9 @@ function onClientNameInput() {
       createBtn.textContent = "Creating…";
 
       try {
+        const voice_talent = voiceEl ? String(voiceEl.value || '').trim() : '';
+        const notes = notesEl ? String(notesEl.value || '').trim() : '';
+        
         const payload = {
           artist,
           asset_type,
@@ -1542,6 +1617,10 @@ function onClientNameInput() {
           client_company_name,
           client_id: (clientIdEl && clientIdEl.value ? Number(clientIdEl.value) : null),
         };
+        
+        // Add optional fields if present
+        if (voice_talent) payload.voice_talent = voice_talent;
+        if (notes) payload.notes = notes;
 
         const url = "/orders/new?initials=" + encodeURIComponent(rep_code);
 
@@ -1676,6 +1755,16 @@ createBtn.addEventListener("click", create);
         </div>
       </div>
 
+      <div class="byp-row" id="nt_voice_row" style="display:none;">
+        <label for="nt_voice">Voice Talent</label>
+        <select id="nt_voice"></select>
+      </div>
+
+      <div class="byp-row" id="nt_notes_row" style="display:none;">
+        <label for="nt_notes">Notes</label>
+        <textarea id="nt_notes" rows="3" placeholder="Optional notes..."></textarea>
+      </div>
+
       <div class="byp-hint">* required</div>
       <div id="nt_err" class="byp-err"></div>
       <div class="byp-actions">
@@ -1708,12 +1797,44 @@ createBtn.addEventListener("click", create);
     const assetRadioEl = $m("nt_asset_radio");
     const assetVideoEl = $m("nt_asset_video");
     const assetOtherEl = $m("nt_asset_other");
+    const voiceEl = $m("nt_voice");
+    const voiceRowEl = $m("nt_voice_row");
+    const notesEl = $m("nt_notes");
+    const notesRowEl = $m("nt_notes_row");
     const errEl = $m("nt_err");
     const cancelBtn = $m("nt_cancel");
     const createBtn = $m("nt_create");
 
     // Populate rep dropdown
     await populateRepSelect(repEl);
+    
+    // Load voice talents and populate dropdown
+    await loadVoiceTalents();
+    populateVoiceTalentDropdown(voiceEl);
+    
+    // Show/hide voice talent dropdown based on selected asset types
+    function toggleVoiceDropdownTour() {
+      const hasRadio = assetRadioEl && assetRadioEl.checked;
+      const hasVideo = assetVideoEl && assetVideoEl.checked;
+      const hasOther = assetOtherEl && assetOtherEl.checked;
+      const showVoice = hasRadio || hasVideo || hasOther;
+      
+      if (voiceRowEl) voiceRowEl.style.display = showVoice ? 'flex' : 'none';
+      if (notesRowEl) notesRowEl.style.display = showVoice ? 'flex' : 'none';
+      
+      // Reset voice selection if hidden
+      if (!showVoice && voiceEl) voiceEl.value = '';
+    }
+    
+    // Wire up checkbox change handlers
+    [assetArtEl, assetRadioEl, assetVideoEl, assetOtherEl].forEach(checkbox => {
+      if (checkbox) checkbox.addEventListener('change', toggleVoiceDropdownTour);
+    });
+    
+    // Initial toggle
+    toggleVoiceDropdownTour();
+    
+    // Voice dropdown does nothing special - backend will handle notes generation
 
     // --- Client autocomplete (from clients table) ---
     let clientSuggestTimer = null;
@@ -2138,6 +2259,12 @@ createBtn.addEventListener("click", create);
           client_company_name,
           client_id,
         };
+        
+        // Add optional fields if present
+        const voice_talent = voiceEl ? String(voiceEl.value || '').trim() : '';
+        const notes = notesEl ? String(notesEl.value || '').trim() : '';
+        if (voice_talent) payload.voice_talent = voice_talent;
+        if (notes) payload.notes = notes;
 
         // Build query string with asset types
         const assetTypesParam = asset_types.map(at => `asset_types=${encodeURIComponent(at)}`).join("&");

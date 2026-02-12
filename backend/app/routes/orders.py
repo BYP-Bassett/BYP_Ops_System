@@ -41,6 +41,7 @@ class TourCreate(BaseModel):
     client_company_name: str
     status: str | None = "draft"
     notes: str | None = None
+    voice_talent: str | None = None
     rep_code: str | None = None
     rep_name: str | None = None
     client_id: int | None = None
@@ -308,20 +309,33 @@ def _strip_auto_parent_prefixes(text: str | None) -> str:
     return cleaned
 
 
-def _default_notes_for_new_order(asset_type: str, existing_notes: str | None) -> str | None:
-    """Return default boilerplate notes for NEW orders by asset_type (radio/video only)."""
+def _default_notes_for_new_order(asset_type: str, existing_notes: str | None, voice_talent: str | None = None) -> str | None:
+    """Return default boilerplate notes for NEW orders by asset_type.
+    If voice_talent is provided, it will be placed at the top of the template."""
     at = (asset_type or "").strip().lower()
+    
+    # Build the base template based on asset type
     if at == "radio":
-        template = "**Voice**\n\n**Music**\n\n**Audio**"
-    elif at == "video":
-        template = "**Voice**\n\n**Music**\n\n**Audio**\n\n**Video**\n\nDrop files here: "
+        base_template = "**Music**\n\n**Audio**"
+    elif at == "video" or at == "other":
+        base_template = "**Music**\n\n**Audio**\n\n**Video**\n\nDrop files here: "
     else:
+        # No template for art or unknown types
         return None
-
+    
+    # If voice_talent provided, prepend it
+    voice_name = (voice_talent or "").strip()
+    if voice_name:
+        template = f"**Voice**\n{voice_name}\n\n{base_template}"
+    else:
+        # No voice provided, just use the base template
+        template = base_template
+    
+    # If user already typed something in notes field, keep it at the bottom
     existing = existing_notes or ""
     if existing.strip():
-        # Put template at the top, keep user's content below with a blank line separator.
         return f"{template}\n\n{existing.lstrip()}"
+    
     return template
 
 
@@ -792,7 +806,11 @@ def create_order(
         pass
 
     # Auto-prepend default boilerplate for NEW radio/video orders (art excluded).
-    default_notes = _default_notes_for_new_order(payload.asset_type, getattr(payload, "notes", None))
+    default_notes = _default_notes_for_new_order(
+        payload.asset_type, 
+        getattr(payload, "notes", None),
+        getattr(payload, "voice_talent", None)
+    )
     if default_notes is not None:
         payload.notes = default_notes
 
@@ -891,6 +909,11 @@ def create_tour_orders(
     created_orders = []
     
     for asset_type in unique_asset_types:
+        # Only apply voice_talent to radio/video/other, not art
+        voice_for_order = None
+        if asset_type.lower() in ['radio', 'video', 'other']:
+            voice_for_order = getattr(payload, "voice_talent", None)
+        
         # Create a copy of the payload for each asset type
         order_payload = OrderCreateWithRep(
             artist=payload.artist,
@@ -899,11 +922,16 @@ def create_tour_orders(
             client_name=payload.client_name,
             client_company_name=payload.client_company_name,
             notes=payload.notes,
+            voice_talent=voice_for_order,
             client_id=getattr(payload, "client_id", None),
         )
         
         # Auto-prepend default boilerplate for NEW radio/video orders
-        default_notes = _default_notes_for_new_order(asset_type, getattr(payload, "notes", None))
+        default_notes = _default_notes_for_new_order(
+            asset_type, 
+            getattr(payload, "notes", None),
+            voice_for_order
+        )
         if default_notes is not None:
             order_payload.notes = default_notes
         
