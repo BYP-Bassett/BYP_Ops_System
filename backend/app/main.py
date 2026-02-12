@@ -2256,6 +2256,8 @@ var orderRows = document.getElementById("orderRows");
 
       // Editable inputs
       var assetTypeSelect = null;
+      var voiceTalentSelect = null;
+      var voiceTalents = []; // Cache for voice talents
       var notesInput = null;
       var clientNameInput = null;
       var clientCompanyInput = null;
@@ -2268,6 +2270,7 @@ var orderRows = document.getElementById("orderRows");
       // Track last-loaded values so we can enable Save only when dirty
       var baseline = {
         asset_type: "",
+        voice_talent: "",
         notes: "",
         client_name: "",
         client_company_name: "",
@@ -2279,6 +2282,23 @@ var orderRows = document.getElementById("orderRows");
       var isDraftNow = false;
       var isSaving = false;
       var hasLoadedOnce = false;
+
+      // Load voice talents from API
+      function loadVoiceTalents() {
+        return fetch('/api/voice-talents', { credentials: 'same-origin' })
+          .then(function(res) {
+            if (!res.ok) return [];
+            return res.json();
+          })
+          .then(function(data) {
+            voiceTalents = Array.isArray(data) ? data : [];
+            return voiceTalents;
+          })
+          .catch(function() {
+            voiceTalents = [];
+            return [];
+          });
+      }
 
       document.getElementById("backBtn").addEventListener("click", function() {
         // Always go back to main search.
@@ -2546,9 +2566,62 @@ function addInputRow(tbody, label, id, kind) {
         return (s === null || s === undefined) ? "" : String(s);
       }
 
+      // Populate voice talent dropdown (must be after normalize())
+      function populateVoiceTalentDropdown(selectEl, currentValue) {
+        if (!selectEl) return;
+        selectEl.innerHTML = '<option value="">-- Select Voice Talent (Optional) --</option>';
+        
+        if (!voiceTalents || voiceTalents.length === 0) return;
+        
+        // Normalize current value for comparison
+        var normalizedCurrent = normalize(currentValue || '');
+        
+        var inHouse = voiceTalents.filter(function(v) { return v.section === 'IN_HOUSE'; });
+        var outside = voiceTalents.filter(function(v) { return v.section === 'OUTSIDE'; });
+        
+        if (inHouse.length > 0) {
+          var inHouseGroup = document.createElement('optgroup');
+          inHouseGroup.label = 'In House';
+          for (var i = 0; i < inHouse.length; i++) {
+            var opt = document.createElement('option');
+            opt.value = inHouse[i].name;
+            opt.textContent = inHouse[i].name;
+            if (normalize(inHouse[i].name) === normalizedCurrent) opt.selected = true;
+            inHouseGroup.appendChild(opt);
+          }
+          selectEl.appendChild(inHouseGroup);
+        }
+        
+        if (outside.length > 0) {
+          var outsideGroup = document.createElement('optgroup');
+          outsideGroup.label = 'Outside';
+          for (var j = 0; j < outside.length; j++) {
+            var opt2 = document.createElement('option');
+            opt2.value = outside[j].name;
+            opt2.textContent = outside[j].name;
+            if (normalize(outside[j].name) === normalizedCurrent) opt2.selected = true;
+            outsideGroup.appendChild(opt2);
+          }
+          selectEl.appendChild(outsideGroup);
+        }
+      }
+
+      // Show/hide voice talent dropdown based on asset type
+      function toggleVoiceTalentVisibility() {
+        if (!voiceTalentSelect) return;
+        var row = voiceTalentSelect.closest('div.row');
+        if (!row) return;
+        
+        var assetType = (assetTypeSelect ? assetTypeSelect.value : '').toLowerCase();
+        var showVoice = (assetType === 'radio' || assetType === 'video' || assetType === 'other');
+        
+        row.style.display = showVoice ? '' : 'none';
+      }
+
       function getDraft() {
         return {
           asset_type: normalize(assetTypeSelect ? assetTypeSelect.value : ""),
+          voice_talent: normalize(voiceTalentSelect ? voiceTalentSelect.value : ""),
           notes: normalize(notesInput ? notesInput.value : ""),
           client_name: normalize(clientNameInput ? clientNameInput.value : ""),
           client_company_name: normalize(clientCompanyInput ? clientCompanyInput.value : ""),
@@ -2558,6 +2631,7 @@ function addInputRow(tbody, label, id, kind) {
 
       function setDraftFromBaseline() {
         if (assetTypeSelect) assetTypeSelect.value = baseline.asset_type;
+        if (voiceTalentSelect) voiceTalentSelect.value = baseline.voice_talent;
         if (notesInput) notesInput.value = baseline.notes;
         if (clientNameInput) clientNameInput.value = baseline.client_name;
         if (clientCompanyInput) clientCompanyInput.value = baseline.client_company_name;
@@ -2567,6 +2641,7 @@ function addInputRow(tbody, label, id, kind) {
         var d = getDraft();
         return (
           d.asset_type !== baseline.asset_type ||
+          d.voice_talent !== baseline.voice_talent ||
           d.notes !== baseline.notes ||
           d.client_name !== baseline.client_name ||
           d.client_company_name !== baseline.client_company_name ||
@@ -2644,6 +2719,7 @@ function addInputRow(tbody, label, id, kind) {
         var d = getDraft();
         var payload = {
           notes: d.notes,
+          voice_talent: d.voice_talent,
           client_name: d.client_name,
           client_company_name: d.client_company_name
         };
@@ -2699,6 +2775,7 @@ function addInputRow(tbody, label, id, kind) {
             // Update baseline locally so closing/finalizing won't lose changes.
             baseline = {
               asset_type: d.asset_type,
+              voice_talent: d.voice_talent,
               notes: d.notes,
               client_name: d.client_name,
               client_company_name: d.client_company_name,
@@ -2936,13 +3013,20 @@ function load() {
             addRow(orderRows, "Artist", data.artist);
             // Asset Type (editable only when draft)
             var at = normalize(data.asset_type).toLowerCase();
-            var assetOptions = ["radio", "video", "art", "longform", "other"];
+            var assetOptions = ["radio", "video", "art", "other"];
             // Ensure current value is present even if it's not in our known list.
             if (at && assetOptions.indexOf(at) === -1) {
               assetOptions.unshift(at);
             }
             assetTypeSelect = addSelectRow(orderRows, "Asset Type", "editAssetType", assetOptions);
             assetTypeSelect.value = at || "";
+            
+            // Voice Talent dropdown (conditional visibility based on asset type)
+            var voiceTalentOptions = [""];  // Empty placeholder, will be populated after loading voices
+            voiceTalentSelect = addSelectRow(orderRows, "Voice Talent", "editVoiceTalent", voiceTalentOptions);
+            
+            // Wire up asset type change to toggle voice talent visibility
+            assetTypeSelect.addEventListener('change', toggleVoiceTalentVisibility);
 
             addRow(orderRows, "Status", data.status);
 
@@ -3297,9 +3381,20 @@ function fetchClientSuggest(q) {
               { label: "Rep Name", key: "rep_name" }
             ]);
 
+            // Load voice talents and populate dropdown
+            loadVoiceTalents().then(function() {
+              populateVoiceTalentDropdown(voiceTalentSelect, data.voice_talent);
+              // Explicitly set the value as a fallback
+              if (voiceTalentSelect && data.voice_talent) {
+                voiceTalentSelect.value = normalize(data.voice_talent);
+              }
+              toggleVoiceTalentVisibility();
+            });
+
             // Baseline values
             baseline = {
               asset_type: normalize(data.asset_type).toLowerCase(),
+              voice_talent: normalize(data.voice_talent),
               notes: normalize(data.notes),
               client_name: normalize(data.client_name),
               client_company_name: normalize(data.client_company_name)
@@ -3313,6 +3408,7 @@ function fetchClientSuggest(q) {
               scheduleAutoSave();
             }
             if (assetTypeSelect) assetTypeSelect.addEventListener("change", onChange);
+            if (voiceTalentSelect) voiceTalentSelect.addEventListener("change", onChange);
             notesInput.addEventListener("input", onChange);
             clientNameInput.addEventListener("input", onChange);
             clientCompanyInput.addEventListener("input", onChange);
