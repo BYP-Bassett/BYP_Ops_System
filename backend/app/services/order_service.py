@@ -38,6 +38,7 @@ def create_order(db: Session, data):
         artist=data.artist,
         asset_type=data.asset_type,
         notes=getattr(data, "notes", None),
+        voice_talent=getattr(data, "voice_talent", None),
 
         client_name=getattr(data, "client_name", None),
         client_company_name=getattr(data, "client_company_name", None),

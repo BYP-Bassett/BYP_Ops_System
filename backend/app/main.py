@@ -3540,6 +3540,7 @@ def web_order_print(request: Request, order_id: int):
             client_company = _html_escape(client_name)
 
         notes = _html_escape(str(getattr(o, "notes", "") or ""))
+        voice_talent = _html_escape(str(getattr(o, "voice_talent", "") or ""))
 
         # Billing fields are intentionally NOT saved back to the order.
         # Everything on the page is editable for print-only tweaks.
@@ -3556,6 +3557,8 @@ def web_order_print(request: Request, order_id: int):
 
     /* One-page lock */
     .page {{
+      width: 7.5in; /* 8.5in - 0.5in left - 0.5in right */
+      max-width: 7.5in;
       height: 10in; /* 11in - 0.5in top - 0.5in bottom */
       display: flex;
       flex-direction: column;
@@ -3566,12 +3569,12 @@ def web_order_print(request: Request, order_id: int):
 
     .gridTop {{
       display: grid;
-      grid-template-columns: 44% 56%;
-      gap: 12px;
-      align-items: stretch;
+      grid-template-columns: 52% 48%;
+      gap: 8px;
+      align-items: start;
     }}
 
-    .box {{ border: 2px solid #333; padding: 10px; overflow: hidden; }}
+    .box {{ border: 2px solid #333; padding: 10px; overflow: hidden; box-sizing: border-box; }}
     .box.tight {{ padding: 8px 10px; }}
     .row {{ display: grid; grid-template-columns: 110px 1fr; gap: 10px; margin: 6px 0; }}
     .lbl {{ font-weight: 700; }}
@@ -3586,9 +3589,10 @@ def web_order_print(request: Request, order_id: int):
     }}
     .editable.boxfill {{ border: none; padding: 0; min-height: 0; }}
 
-    /* Billing box MUST NOT expand */
+    /* Billing box should align with Voice box bottom */
     .billingBox {{
-      height: 2.35in;
+      height: auto;
+      min-height: 2.35in;
       overflow: hidden;
       display: flex;
       flex-direction: column;
@@ -3597,16 +3601,22 @@ def web_order_print(request: Request, order_id: int):
     .poLabel {{ font-weight:700; }}
     .poField {{
       flex: 1;
+      max-width: 100%;
       min-height: 22px;
       border: 1px solid #777;
       padding: 4px 6px;
       outline: none;
+      word-wrap: break-word;
+      overflow-wrap: break-word;
     }}
     .billFill {{
       flex: 1;
+      max-width: 100%;
       border: none;
       outline: none;
       white-space: pre-wrap;
+      word-wrap: break-word;
+      overflow-wrap: break-word;
       overflow: hidden; /* truncate */
     }}
 
@@ -3668,9 +3678,14 @@ def web_order_print(request: Request, order_id: int):
           <div class="row"><div class="lbl">SP#</div><div class="mono"><span class="editable boxfill" contenteditable="true">{sp_number}</span></div></div>
           <div class="row"><div class="lbl">Asset Type</div><div><span class="editable boxfill" contenteditable="true">{asset}</span></div></div>
         </div>
+        
+        <div class="box tight" style="margin-top:12px;">
+          <div class="row"><div class="lbl">Voice</div><div><span class="editable boxfill" contenteditable="true">{voice_talent}</span></div></div>
+        </div>
       </div>
 
       <div class="box billingBox">
+        <div class="poLabel" style="font-weight:700; margin-bottom:8px;">Billing</div>
         <div class="poRow">
           <div class="poLabel">PO#</div>
           <div id="poField" class="poField" contenteditable="true"></div>

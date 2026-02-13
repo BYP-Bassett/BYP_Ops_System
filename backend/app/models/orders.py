@@ -18,6 +18,7 @@ class Order(Base):
     artist = Column(String, index=True)
     asset_type = Column(String)  # 'radio', 'video', or 'art'
     notes = Column(String, nullable=True)
+    voice_talent = Column(String, nullable=True)  # Voice talent name
 
     # Rep tracking
     rep_name = Column(String(100), nullable=False, server_default=text("'SB - Steve Bassett'"))
