@@ -2569,15 +2569,29 @@ function addInputRow(tbody, label, id, kind) {
       // Populate voice talent dropdown (must be after normalize())
       function populateVoiceTalentDropdown(selectEl, currentValue) {
         if (!selectEl) return;
+        
+        console.log('=== POPULATE VOICE TALENT DROPDOWN DEBUG ===');
+        console.log('currentValue:', currentValue);
+        console.log('currentValue type:', typeof currentValue);
+        console.log('voiceTalents array:', voiceTalents);
+        
         selectEl.innerHTML = '<option value="">-- Select Voice Talent (Optional) --</option>';
         
-        if (!voiceTalents || voiceTalents.length === 0) return;
+        if (!voiceTalents || voiceTalents.length === 0) {
+          console.log('ERROR: voiceTalents is empty or undefined');
+          return;
+        }
         
         // Normalize current value for comparison
         var normalizedCurrent = normalize(currentValue || '');
+        console.log('normalizedCurrent:', normalizedCurrent);
         
         var inHouse = voiceTalents.filter(function(v) { return v.section === 'IN_HOUSE'; });
         var outside = voiceTalents.filter(function(v) { return v.section === 'OUTSIDE'; });
+        
+        console.log('inHouse count:', inHouse.length, 'outside count:', outside.length);
+        
+        var matchFound = false;
         
         if (inHouse.length > 0) {
           var inHouseGroup = document.createElement('optgroup');
@@ -2586,7 +2600,15 @@ function addInputRow(tbody, label, id, kind) {
             var opt = document.createElement('option');
             opt.value = inHouse[i].name;
             opt.textContent = inHouse[i].name;
-            if (normalize(inHouse[i].name) === normalizedCurrent) opt.selected = true;
+            
+            var normalized = normalize(inHouse[i].name);
+            console.log('Comparing IN_HOUSE:', normalized, '===', normalizedCurrent, '?', normalized === normalizedCurrent);
+            
+            if (normalized === normalizedCurrent) {
+              opt.selected = true;
+              matchFound = true;
+              console.log('✓ MATCH FOUND (IN_HOUSE):', inHouse[i].name);
+            }
             inHouseGroup.appendChild(opt);
           }
           selectEl.appendChild(inHouseGroup);
@@ -2599,11 +2621,24 @@ function addInputRow(tbody, label, id, kind) {
             var opt2 = document.createElement('option');
             opt2.value = outside[j].name;
             opt2.textContent = outside[j].name;
-            if (normalize(outside[j].name) === normalizedCurrent) opt2.selected = true;
+            
+            var normalized2 = normalize(outside[j].name);
+            console.log('Comparing OUTSIDE:', normalized2, '===', normalizedCurrent, '?', normalized2 === normalizedCurrent);
+            
+            if (normalized2 === normalizedCurrent) {
+              opt2.selected = true;
+              matchFound = true;
+              console.log('✓ MATCH FOUND (OUTSIDE):', outside[j].name);
+            }
             outsideGroup.appendChild(opt2);
           }
           selectEl.appendChild(outsideGroup);
         }
+        
+        console.log('Match found?', matchFound);
+        console.log('Final selectEl.value:', selectEl.value);
+        console.log('Final selectEl.selectedIndex:', selectEl.selectedIndex);
+        console.log('===========================================');
       }
 
       // Show/hide voice talent dropdown based on asset type
@@ -2990,6 +3025,11 @@ function load() {
           })
           .then(function(data) {
             if (!data) return;
+
+            console.log('=== FULL ORDER DATA ===');
+            console.log('Complete data object:', data);
+            console.log('data.voice_talent:', data.voice_talent);
+            console.log('======================');
 
             currentData = data;
 
@@ -3384,10 +3424,28 @@ function fetchClientSuggest(q) {
             // Load voice talents and populate dropdown
             loadVoiceTalents().then(function() {
               populateVoiceTalentDropdown(voiceTalentSelect, data.voice_talent);
-              // Explicitly set the value as a fallback
-              if (voiceTalentSelect && data.voice_talent) {
-                voiceTalentSelect.value = normalize(data.voice_talent);
-              }
+              
+              // CRITICAL FIX: Force the value after DOM updates complete
+              // The setTimeout ensures options are fully rendered before we try to set the value
+              setTimeout(function() {
+                if (voiceTalentSelect && data.voice_talent) {
+                  // Try direct value assignment first
+                  voiceTalentSelect.value = data.voice_talent;
+                  
+                  // If that didn't work, try manual selection by comparing values
+                  if (voiceTalentSelect.value !== data.voice_talent) {
+                    var options = voiceTalentSelect.options;
+                    for (var i = 0; i < options.length; i++) {
+                      if (options[i].value === data.voice_talent || 
+                          normalize(options[i].value) === normalize(data.voice_talent)) {
+                        voiceTalentSelect.selectedIndex = i;
+                        break;
+                      }
+                    }
+                  }
+                }
+              }, 50);
+              
               toggleVoiceTalentVisibility();
             });
 

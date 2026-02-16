@@ -201,6 +201,7 @@ def _order_snapshot(order: Order) -> dict:
         "client_name": getattr(order, "client_name", None),
         "client_company_name": getattr(order, "client_company_name", None),
         "notes": getattr(order, "notes", None),
+        "voice_talent": getattr(order, "voice_talent", None),
         "instructions": getattr(order, "instructions", None),
         "trello_card_id": getattr(order, "trello_card_id", None),
         "trello_checklist_id": getattr(order, "trello_checklist_id", None),
@@ -1467,6 +1468,7 @@ def get_order(
         "artist": getattr(order, "artist", None),
         "asset_type": getattr(order, "asset_type", None),
         "notes": getattr(order, "notes", None),
+        "voice_talent": getattr(order, "voice_talent", None),
 
         "sp_id": getattr(order, "sp_id", None),
         "sp_number": sp_number,
@@ -1716,6 +1718,7 @@ def update_order(
     for field in [
         "artist",
         "notes",
+        "voice_talent",
         "client_name",
         "client_company_name",
         "order_type",
