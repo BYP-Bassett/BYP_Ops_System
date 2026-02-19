@@ -105,27 +105,27 @@ function reorderSearchToolbarButtons(){
     // Move the logout FORM (not just the button) to keep it functional
     move(logoutForm, right);
 
-    // "Logged in as ..." line ABOVE the toolbar row (right-aligned)
-    // Do this once; pull info from /me if available
-    const existingLine = document.getElementById("loggedInAsLine");
-    if (!existingLine) {
-      const line = document.createElement("div");
-      line.id = "loggedInAsLine";
-      line.style.fontSize = "12px";
-      line.style.opacity = "0.9";
-      line.style.textAlign = "right";
-      line.style.marginBottom = "6px";
-
-      // Insert just above the toolbar host
-      host.parentElement && host.parentElement.insertBefore(line, host);
-
-      // Populate asynchronously; be defensive about shape of /me
-      fetchMe().then(me => {
-        const name = (me && (me.display_name || me.name || me.email || me.username)) ? String(me.display_name || me.name || me.email || me.username) : "unknown";
-        line.textContent = `Logged in as: ${name}`;
-      }).catch(() => {
-        line.textContent = "Logged in as: unknown";
-      });
+    // Move the existing "Logged in as..." display ABOVE the toolbar (right-aligned)
+    const whoami = document.getElementById("whoami");
+    if (whoami && host.parentElement) {
+      // Check if we already created a wrapper for it
+      let wrapper = document.getElementById("whoamiWrapper");
+      if (!wrapper) {
+        wrapper = document.createElement("div");
+        wrapper.id = "whoamiWrapper";
+        wrapper.style.textAlign = "right";
+        wrapper.style.marginBottom = "8px";
+        wrapper.style.width = "100%";
+        
+        // Insert wrapper just before the toolbar
+        host.parentElement.insertBefore(wrapper, host);
+      }
+      
+      // Move whoami into the wrapper (removes it from toolbar)
+      wrapper.appendChild(whoami);
+      
+      // Ensure whoami itself doesn't have conflicting styles
+      whoami.style.display = "inline-block";
     }
 
   } catch (_) {
@@ -582,14 +582,22 @@ return p.toString();
     const id = Number(orderId);
     if (!id) return;
     const pretty = label ? String(label).trim() : "";
-    const msg = pretty ? `Delete order ${id} (${pretty})?` : `Delete order ${id}?`;
-    if (!confirm(msg + "\n\nThis will move it to Deleted Orders.")) return;
 
     try {
       if (els.error) els.error.textContent = "";
-      const initials = await getActionInitials();
-      if (!initials) throw new Error('Missing initials');
+      
+      // Prompt for initials (this serves as both authentication and confirmation)
+      const msg = pretty ? `Enter your initials to delete order ${id} (${pretty}):` : `Enter your initials to delete order ${id}:`;
+      const typed = prompt(msg, "");
+      if (typed === null) return; // User cancelled
+      
+      const initials = String(typed || "").trim();
+      if (!initials) {
+        if (els.error) els.error.textContent = "Initials required.";
+        return;
+      }
 
+      // Attempt delete
       try {
         await softDeleteOrder(id, initials, false);
       } catch (err) {

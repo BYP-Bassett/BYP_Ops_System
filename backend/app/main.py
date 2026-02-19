@@ -1180,7 +1180,7 @@ def clients_json(
 
 @app.get("/admin/clients", include_in_schema=False)
 def clients_page(request: Request, msg: str | None = None, err: str | None = None):
-    gate = _require_login_or_redirect(request)
+    gate = _require_admin_or_redirect(request)
     if gate is not None:
         return gate
 
@@ -1594,8 +1594,8 @@ def clients_update(
     company_name: str = Form(""),
     is_active: str | None = Form(None),
 ):
-    # Logged-in users only (NOT admin-only).
-    gate = _require_login_or_redirect(request)
+    # Admin only
+    gate = _require_admin_or_redirect(request)
     if gate is not None:
         # fetch() callers need JSON, not HTML redirects.
         try:
@@ -1777,7 +1777,7 @@ def admin_deleted_orders_page(request: Request, msg: str | None = None, err: str
                   <td>{deleted_at}</td>
                   <td>{deleted_by}</td>
                   <td style=\"white-space:nowrap;\">
-                    <a class=\"btnlink\" href=\"/order/{oid}\" target=\"_blank\" rel=\"noopener\">View</a>
+                    <a class=\"btnlink\" href=\"/order/{oid}\">View</a>
                     <form method=\"post\" action=\"/admin/deleted-orders/{oid}/restore\" style=\"display:inline; margin:0; margin-left:6px;\" onsubmit=\"return confirm('Restore order {oid}?');\">
                       <button type=\"submit\">Restore</button>
                     </form>
@@ -2166,7 +2166,6 @@ def web_order_detail(request: Request, order_id: int):
 
   <div class="bar">
     <button id="backBtn">← Back</button>
-    <a class="muted" href="/orders/__ORDER_ID__" target="_blank" rel="noopener">Open JSON</a>
     <button id="openTrelloBtn" type="button" disabled>Open Trello Card</button>
 
     <span class="muted">Parent:</span>
@@ -2301,10 +2300,30 @@ var orderRows = document.getElementById("orderRows");
       }
 
       document.getElementById("backBtn").addEventListener("click", function() {
-        // Always go back to main search.
-        ensureSavedThen(function() {
-          window.location.href = "/";
-        });
+        console.log('=== BACK BUTTON CLICKED (main.py handler) ===');
+        console.log('hasLoadedOnce:', hasLoadedOnce);
+        console.log('isDirty():', isDirty());
+        console.log('isDraftNow:', isDraftNow);
+        
+        // If not dirty, just go back immediately
+        if (!hasLoadedOnce || !isDirty()) {
+          console.log('Not dirty, calling history.back()');
+          window.history.back();
+          return;
+        }
+        
+        // If dirty and is a draft, save first
+        if (isDraftNow) {
+          console.log('Dirty and draft, saving first');
+          saveAsync(false).then(function(ok) {
+            console.log('Save result:', ok);
+            if (ok) window.history.back();
+          });
+        } else {
+          // Dirty but not draft - show error
+          console.log('Dirty but not draft, showing error');
+          errEl.textContent = "This order isn't in DRAFT. Use Override Edit first.";
+        }
       });
 
       // Warn if user tries to bail with unsaved changes still pending.
@@ -2644,7 +2663,7 @@ function addInputRow(tbody, label, id, kind) {
       // Show/hide voice talent dropdown based on asset type
       function toggleVoiceTalentVisibility() {
         if (!voiceTalentSelect) return;
-        var row = voiceTalentSelect.closest('div.row');
+        var row = voiceTalentSelect.closest('tr');
         if (!row) return;
         
         var assetType = (assetTypeSelect ? assetTypeSelect.value : '').toLowerCase();
@@ -3067,6 +3086,9 @@ function load() {
             
             // Wire up asset type change to toggle voice talent visibility
             assetTypeSelect.addEventListener('change', toggleVoiceTalentVisibility);
+            
+            // Call immediately to set initial visibility based on current asset type
+            toggleVoiceTalentVisibility();
 
             addRow(orderRows, "Status", data.status);
 
@@ -3095,7 +3117,8 @@ function load() {
               { label: "SP Number", key: "sp.sp_number" },
               { label: "Order Type", key: "sp.order_type" },
               { label: "Revision Of", key: "sp.revision_of" },
-              { label: "Add'l Vers Of", key: "sp.additional_version_of" }
+              { label: "Add'l Vers Of", key: "sp.additional_version_of" },
+              { label: "Show Related", key: "sp.show_related" }
             ]);
 
             // ----- Client section (editable fields first) -----
@@ -3650,7 +3673,7 @@ def web_order_print(request: Request, order_id: int):
     /* Billing box should align with Voice box bottom */
     .billingBox {{
       height: auto;
-      min-height: 2.35in;
+      min-height: 2.85in;
       overflow: hidden;
       display: flex;
       flex-direction: column;
@@ -3721,7 +3744,7 @@ def web_order_print(request: Request, order_id: int):
   </div>
 
   <div class="page">
-    <div class="title"><span class="editable boxfill" contenteditable="true">{client_company}</span></div>
+    <div class="title"><span class="editable boxfill" contenteditable="true">BYP Billing Info</span></div>
 
     <div class="gridTop">
       <div>
